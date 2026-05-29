@@ -10,3 +10,4 @@
 
 export { Registry } from "./registry.ts"
 export type { CollectionDef } from "./registry.ts"
+export { SyncDurableObject } from "./sync-do.ts"

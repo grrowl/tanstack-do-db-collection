@@ -9,13 +9,18 @@ export default defineWorkersProject({
     poolOptions: {
       workers: {
         singleWorker: true,
-        isolatedStorage: true,
+        // WebSocket integration tests keep durable connections open across the
+        // suite, which is incompatible with isolated-storage stacking. Tests
+        // use unique DO names (random UUIDs / distinct rooms) for isolation
+        // instead, so per-test storage rollback is unnecessary.
+        isolatedStorage: false,
         main: "./tests/test-worker.ts",
         miniflare: {
           compatibilityDate: "2026-03-10",
           compatibilityFlags: ["nodejs_compat"],
           durableObjects: {
             TEST_DO: { className: "TestDO", useSQLite: true },
+            SYNC_DO: { className: "SyncTestDO", useSQLite: true },
           },
         },
       },
