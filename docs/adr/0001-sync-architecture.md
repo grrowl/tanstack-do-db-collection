@@ -1,6 +1,8 @@
 # 0001 — Sync architecture: single-ordered-stream over a Durable Object
 
-**Status:** Accepted
+**Status:** Accepted, **amended by [ADR-0002](./0002-adversarial-review-corrections.md)**
+(ordering barrier, on-demand shaping, retention/liveness, before-image dropped).
+Read 0002 alongside this document.
 
 ## Context
 
