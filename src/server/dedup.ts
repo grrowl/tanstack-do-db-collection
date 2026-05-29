@@ -58,3 +58,12 @@ export function encodeResult(value: unknown): string | null {
 export function decodeResult(stored: string | null): unknown {
   return stored === null ? undefined : decodeValue(stored)
 }
+
+/**
+ * Drop dedup entries older than `olderThanMs`. Retention is INDEPENDENT of the
+ * changelog (ADR-0002 C5): sized to the maximum client retry/outbox window, not
+ * the compaction floor — a fully-current client can still retry an old txId.
+ */
+export function sweepDedup(sql: SqlStorage, olderThanMs: number, nowMs: number): void {
+  sql.exec("DELETE FROM _sync_seen_tx WHERE ts < ?", nowMs - olderThanMs)
+}

@@ -17,6 +17,7 @@ import type { SqlStorage, SqlStorageValue } from "@cloudflare/workers-types"
 import { createFrameCodec, type FrameCodec } from "../wire/frame-codec.ts"
 import type { ClientFrame, ServerFrame } from "../wire/frames.ts"
 import {
+  compactChanges,
   currentSeq,
   getDrainCursor,
   hydrateRows,
@@ -27,7 +28,7 @@ import {
   setDrainCursor,
 } from "./changes.ts"
 import { Broadcaster } from "./broadcast.ts"
-import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx } from "./dedup.ts"
+import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx, sweepDedup } from "./dedup.ts"
 import type { Registry } from "./registry.ts"
 import { compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
 import { SubscriptionRegistry } from "./subscriptions.ts"
@@ -42,6 +43,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   protected readonly subs = new SubscriptionRegistry()
   /** Egress coalescer tick (ms) — the single user-perceived-latency knob. */
   protected readonly tickMs: number = 50
+  /** Compact the change log every this-many drained mutations (not on a timer —
+   *  an alarm would wake idle DOs; this rides recent work). */
+  protected readonly compactionEvery: number = 200
+  /** Dedup retention window (ms), independent of changelog retention (C5). */
+  protected readonly dedupRetentionMs: number = 3_600_000
+  private writesSinceCompaction = 0
   protected readonly broadcaster: Broadcaster
   private readonly liveWs = new Set<WebSocket>()
   private schemaReady = false
@@ -294,6 +301,25 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     }
 
     setDrainCursor(sql, changes[changes.length - 1]!.seq)
+    this.maybeCompact()
+  }
+
+  /**
+   * Opportunistic GC: every `compactionEvery` drained mutations, collapse the
+   * change log to latest-op-per-key and sweep expired dedup entries. Deferred
+   * via `ctx.waitUntil` so it rides just after a burst of work — it never
+   * blocks a mutation's response, and (unlike an alarm) never wakes an idle DO.
+   * `waitUntil` keeps the DO alive until it completes.
+   */
+  private maybeCompact(): void {
+    if (++this.writesSinceCompaction < this.compactionEvery) return
+    this.writesSinceCompaction = 0
+    this.ctx.waitUntil(
+      (async (): Promise<void> => {
+        compactChanges(this.sql)
+        sweepDedup(this.sql, this.dedupRetentionMs, Date.now())
+      })(),
+    )
   }
 
   /** Full-collection subscribe: emit every current row as a snapshot, then a

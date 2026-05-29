@@ -91,6 +91,20 @@ export function minChangeSeq(sql: SqlStorage): number {
   return Number(rows[0]?.s ?? 0)
 }
 
+/**
+ * Compact the change log to the latest op per (tbl,key): superseded rows are
+ * deleted. Bounds the log to ~distinct changed keys. Each key's LATEST op —
+ * including a delete tombstone — is retained, so reconnect catch-up
+ * (latest-op-per-key) stays correct for any cursor and the snap-fallback stays
+ * dormant. (Tombstone pruning + liveness-aware GC — which would activate the
+ * fallback — are deferred post-v1.)
+ */
+export function compactChanges(sql: SqlStorage): void {
+  sql.exec(
+    "DELETE FROM _sync_changes WHERE seq NOT IN (SELECT MAX(seq) FROM _sync_changes GROUP BY tbl, key)",
+  )
+}
+
 /** The "highest seq we've broadcast" watermark. */
 export function getDrainCursor(sql: SqlStorage): number {
   const rows = Array.from(
