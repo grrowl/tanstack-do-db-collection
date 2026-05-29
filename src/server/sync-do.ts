@@ -26,6 +26,7 @@ import {
   setDrainCursor,
   snapshotAll,
 } from "./changes.ts"
+import { Broadcaster } from "./broadcast.ts"
 import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx } from "./dedup.ts"
 import type { Registry } from "./registry.ts"
 import { SubscriptionRegistry } from "./subscriptions.ts"
@@ -38,6 +39,9 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   protected readonly codec: FrameCodec = createFrameCodec()
 
   protected readonly subs = new SubscriptionRegistry()
+  /** Egress coalescer tick (ms) — the single user-perceived-latency knob. */
+  protected readonly tickMs: number = 50
+  protected readonly broadcaster: Broadcaster
   private readonly liveWs = new Set<WebSocket>()
   private schemaReady = false
 
@@ -47,6 +51,8 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"))
     // Restore the live-socket set after a hibernation wake.
     for (const ws of this.ctx.getWebSockets()) this.liveWs.add(ws)
+    this.broadcaster = new Broadcaster((ws, frame) => this.send(ws, frame), this.tickMs)
+    this.broadcaster.start(() => this.liveWs)
   }
 
   protected get sql(): SqlStorage {
@@ -180,8 +186,11 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     }
 
     recordTx(this.sql, f.txId, true, commitSeq, null, null)
-    // Deltas first (to this socket and every other subscriber), then receipt.
+    // Enqueue deltas for all subscribers, then flush THIS socket before its
+    // receipt (C1) so its deltas land first. Other subscribers flush on the
+    // coalescer tick.
     this.drainAndBroadcast()
+    this.broadcaster.flushOne(ws)
     this.send(ws, { t: "committed", txId: f.txId, seq: commitSeq })
   }
 
@@ -215,6 +224,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     const commitSeq = String(currentSeq(this.sql))
     recordTx(this.sql, f.txId, true, commitSeq, null, stored)
     this.drainAndBroadcast()
+    this.broadcaster.flushOne(ws)
     this.send(ws, { t: "committed", txId: f.txId, seq: commitSeq, result })
   }
 
@@ -254,7 +264,6 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       arr.push(c)
     }
 
-    const touched = new Set<WebSocket>()
     for (const [tbl, tableChanges] of byTable) {
       const coll = this.registry.collections.get(tbl)
       if (!coll) continue
@@ -263,21 +272,21 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       const liveKeys = [...latest.values()].filter((c) => c.op !== "delete").map((c) => c.key)
       const hydrated = hydrateRows(sql, tbl, coll.pk, liveKeys)
 
+      // Enqueue into the coalescer; it flushes one `d` per surviving key plus a
+      // single `uptodate` boundary per socket (on the tick, or via flushOne).
       for (const { ws, sub } of this.subs.forCollection(tbl)) {
         for (const [key, change] of latest) {
           const row = hydrated.get(key)
           if (change.op === "delete" || !row) {
-            this.send(ws, { t: "d", sub: sub.subId, key, op: "delete", seq: cursor })
+            this.broadcaster.enqueue(ws, { subId: sub.subId, key, op: "delete" }, cursor)
           } else {
             // Full row as the partial patch; column-level diffs arrive later.
-            this.send(ws, { t: "d", sub: sub.subId, key, op: change.op, cols: row, seq: cursor })
+            this.broadcaster.enqueue(ws, { subId: sub.subId, key, op: change.op, cols: row }, cursor)
           }
         }
-        touched.add(ws)
       }
     }
 
-    for (const ws of touched) this.send(ws, { t: "uptodate", seq: cursor })
     setDrainCursor(sql, changes[changes.length - 1]!.seq)
   }
 
