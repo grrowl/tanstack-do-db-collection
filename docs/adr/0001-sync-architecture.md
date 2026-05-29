@@ -152,7 +152,14 @@ interleave so every milestone is end-to-end demonstrable.
 - **M4** — Egress coalescer (server).
 - **M5** — Filtered subscriptions + IR predicate engine (both); move-in/out via
   before-image.
-- **M6** — Subset shaping + cursor pagination (both).
+- **M6** — Subset shaping (both). **v1 scope: static subset shaping** —
+  `where`/`orderBy`/`limit`/`offset` lowered into SQLite on the `sub` frame
+  (done), with un-lowerable predicates rejected (D6). **Deferred to post-v1:**
+  dynamic per-live-query `loadSubset`/on-demand windows, cursor double-request
+  pagination, and `isWhereSubset` subset dedup. These are an advanced
+  optimization over the static path; the empty-commit no-window-match clearing
+  (verified, ADR-0002 C2) is wired when they land. Not silently dropped —
+  recorded here as a deliberate v1 boundary.
 - **M7** — Compaction-defined retention + reconnect (both).
 - **M8** — Multi-collection multiplexing + client IVM integration (both).
 - **M9** — Hardening, publish build, and OSS polish.
