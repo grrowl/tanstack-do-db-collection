@@ -105,4 +105,22 @@ describe("WebSocketTransport (M3 client)", () => {
     expect(res.result).toEqual({ echoed: { n: 1 } })
     t.close()
   })
+
+  // Regression (browser-only): browsers default WebSocket.binaryType to "blob",
+  // which the codec can't decode — every server frame would be dropped. The
+  // transport must force "arraybuffer". (workerd delivers ArrayBuffer already,
+  // so only a direct check catches this.)
+  it("forces binaryType=arraybuffer on the socket", async () => {
+    const fake = {
+      binaryType: "blob",
+      send: () => {},
+      close: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const t = new WebSocketTransport({ url: "ws://x", open: async () => fake as unknown as WebSocketLike })
+    await t.connect()
+    expect(fake.binaryType).toBe("arraybuffer")
+    t.close()
+  })
 })

@@ -112,6 +112,14 @@ export class WebSocketTransport {
     if (this.connectPromise) return this.connectPromise
     this.connectPromise = (async () => {
       const ws = await this.open()
+      // Browsers default WebSocket.binaryType to "blob"; force "arraybuffer" so
+      // binary frames arrive as ArrayBuffer (workerd already does). Without this
+      // the codec can't decode and every server frame is silently dropped.
+      try {
+        ;(ws as { binaryType?: string }).binaryType = "arraybuffer"
+      } catch {
+        /* some socket impls don't expose binaryType; codec handles AB/Uint8Array */
+      }
       ws.addEventListener("message", (ev) => this.onMessage(ev.data))
       ws.addEventListener("close", () => {
         this.ws = null
