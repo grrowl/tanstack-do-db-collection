@@ -72,11 +72,22 @@ relies on the next `up-to-date` sync commit to clear stale direct upserts —
 boundary carries the delta; for a no-subscription-match write it is empty and
 exists solely to run the clear path.
 
-> **M3 must verify** that an empty `begin()/commit()` actually triggers the
-> `state.ts:1167-1188` clear path against a completed direct transaction. If an
-> empty sync transaction is short-circuited, the adapter instead emits a
-> targeted synced `delete` for the key (idempotent; the row is genuinely not in
-> any of this client's views). Tracked in M3.
+> **Reachability (refined during M3):** the stranded-direct-upsert case only
+> arises when a client writes a row that lands in **no active subscription**.
+> Under full-collection sync (M3) a client that can call `insert` is, by
+> construction, subscribed to that collection — so every write is in-view, the
+> confirming delta always arrives, and the completed direct upsert is harmless
+> (it equals the synced value and clears on the next sync commit). The phantom
+> only becomes reachable with **filtered subsets (M5/M6)**: inserting a row
+> outside your filter.
+>
+> **Therefore the must-verify moves to M5**, where it is needed: does an empty
+> `begin()/commit()` trigger the `state.ts:1167-1188` clear path against a
+> completed direct transaction? If yes, the adapter issues a post-mutation
+> empty sync commit to retire phantoms (and keep in-view overlays, which match
+> synced state). If an empty transaction is short-circuited, the adapter
+> instead emits a targeted idempotent synced `delete` for the out-of-view key.
+> Tracked in M5.
 
 ### C3 — Server-side shaping requires `syncMode: 'on-demand'`
 
