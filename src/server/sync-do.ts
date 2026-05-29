@@ -13,7 +13,7 @@
 // milestone establishes the lifecycle and the wire decode/encode path.
 
 import { DurableObject } from "cloudflare:workers"
-import type { SqlStorage } from "@cloudflare/workers-types"
+import type { SqlStorage, SqlStorageValue } from "@cloudflare/workers-types"
 import { createFrameCodec, type FrameCodec } from "../wire/frame-codec.ts"
 import type { ClientFrame, ServerFrame } from "../wire/frames.ts"
 import {
@@ -24,11 +24,11 @@ import {
   installTriggers,
   readChangesSince,
   setDrainCursor,
-  snapshotAll,
 } from "./changes.ts"
 import { Broadcaster } from "./broadcast.ts"
 import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx } from "./dedup.ts"
 import type { Registry } from "./registry.ts"
+import { compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
 import { SubscriptionRegistry } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
@@ -305,10 +305,30 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       this.send(ws, { t: "reset", sub: frame.subId })
       return
     }
-    const sub = this.subs.add(ws, frame.subId, frame.collection, frame.where)
+    // Lower where/orderBy/limit/offset into SQLite. An un-lowerable predicate
+    // (outside the supported floor) is rejected, not silently full-scanned.
+    let query: { sql: string; params: Array<unknown> }
+    try {
+      query = compileSubsetQuery(frame.collection, {
+        where: frame.where,
+        orderBy: frame.orderBy,
+        limit: frame.limit,
+        offset: frame.offset,
+      })
+    } catch (e) {
+      if (e instanceof UnsupportedPredicateError) {
+        console.error(`sub '${frame.subId}' on '${frame.collection}' rejected: ${e.message}`)
+        this.send(ws, { t: "reset", sub: frame.subId })
+        return
+      }
+      throw e
+    }
+
+    this.subs.add(ws, frame.subId, frame.collection, frame.where)
     const seq = String(currentSeq(this.sql))
-    for (const row of snapshotAll(this.sql, frame.collection)) {
-      if (sub.predicate(row)) this.send(ws, { t: "snap", sub: frame.subId, key: row[coll.pk], row, seq })
+    const rows = Array.from(this.sql.exec(query.sql, ...query.params)) as Array<Record<string, SqlStorageValue>>
+    for (const row of rows) {
+      this.send(ws, { t: "snap", sub: frame.subId, key: row[coll.pk], row, seq })
     }
     this.send(ws, { t: "snap-end", sub: frame.subId, seq })
   }
