@@ -53,6 +53,20 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
         sql.exec("DELETE FROM messages WHERE id = ?", op.key as string)
       },
     })
+    // A second collection on the same DO — exercises multiplexing over one WS.
+    .defineCollection({
+      table: "files",
+      pk: "id",
+      ddl: `CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT)`,
+    })
+    .defineMutation({
+      collection: "files",
+      type: "insert",
+      execute: ({ op, sql }) => {
+        const c = op.cols as unknown as { id: string; name: string }
+        sql.exec("INSERT INTO files(id, name) VALUES (?, ?)", c.id, c.name)
+      },
+    })
     .defineCommand({
       name: "echo",
       execute: ({ args }) => ({ echoed: args }),
