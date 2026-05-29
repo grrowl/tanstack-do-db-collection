@@ -6,9 +6,13 @@
 > catch-up, with a **single ordered stream** carrying both data and write
 > confirmation.
 
-> **Status: pre-1.0, under active construction.** The API will change until
-> 1.0. Built in the open, milestone by milestone — see
+> **Status: v1 feature-complete, pre-1.0.** The core is built and tested
+> end-to-end (CDC + single-stream confirmation, optimistic mutations, filtered
+> subscriptions, subset shaping, reconnect catch-up, compaction, multiplexing,
+> client IVM). The API may still shift before 1.0. Built in the open — see
 > [`docs/adr/`](./docs/adr/) for the decisions and `git log` for the path.
+> Deferred post-v1: dynamic on-demand `loadSubset` windows + subset dedup
+> (static subset shaping ships now).
 
 The Durable Object owns the data. The browser runs a TanStack DB collection
 against it. This library moves the diffs — and nothing more than the diffs.
@@ -68,34 +72,83 @@ the milestone sequence.
 
 ## Quick start
 
-> Lands incrementally as the milestones complete. The shape below is the
-> target API.
+### 1. Define your Durable Object
 
 ```ts
-// server: your Durable Object
 import { Registry, SyncDurableObject } from "tanstack-do-db-collection"
 
-export class SessionDO extends SyncDurableObject<Env> {
-  protected registry = new Registry()
+interface Claims { userId: string }
+
+export class SessionDO extends SyncDurableObject<Env, Claims> {
+  protected registry = new Registry<Claims>()
     .defineCollection({
       table: "messages",
-      pk: "id",
+      pk: "id", // must be a client-supplied TEXT key (ULID/UUIDv7)
       ddl: `CREATE TABLE IF NOT EXISTS messages (
               id TEXT PRIMARY KEY, author TEXT NOT NULL,
               content TEXT NOT NULL, created_at INTEGER NOT NULL)`,
     })
-    .defineMutation({ collection: "messages", type: "insert", /* authorize, execute */ })
+    .defineMutation({
+      collection: "messages",
+      type: "insert",
+      // authorize runs BEFORE the tx (async ok); throw to deny.
+      authorize: ({ user, op }) => {
+        if ((op.cols as { author: string }).author !== user.userId) throw new Error("author mismatch")
+      },
+      // execute runs INSIDE transactionSync — synchronous only.
+      execute: ({ op, sql }) => {
+        const c = op.cols as { id: string; author: string; content: string; created_at: number }
+        sql.exec("INSERT INTO messages(id,author,content,created_at) VALUES(?,?,?,?)", c.id, c.author, c.content, c.created_at)
+      },
+    })
+
+  // Read the Worker-forged claims header into the per-socket attachment.
+  protected parseAttachment(req: Request): Claims {
+    return JSON.parse(req.headers.get("x-claims") ?? "{}") as Claims
+  }
 }
 ```
 
-```ts
-// client: a TanStack DB collection backed by the DO
-import { createCollection } from "@tanstack/db"
-import { doCollectionOptions, WebSocketTransport } from "tanstack-do-db-collection/client"
+### 2. Route the upgrade from your Worker (the trust boundary)
 
-const transport = new WebSocketTransport(`wss://${host}/sync/${sessionId}`)
-const messages = createCollection(doCollectionOptions({ table: "messages", transport }))
+```ts
+export default {
+  async fetch(req: Request, env: Env): Promise<Response> {
+    const claims = await verifyToken(req) // your auth
+    if (!claims) return new Response("unauthorized", { status: 401 })
+    const h = new Headers(req.headers)
+    h.set("x-claims", JSON.stringify(claims)) // .set() overwrites any client-injected value
+    const id = env.SESSION_DO.idFromName(sessionIdFrom(req))
+    return env.SESSION_DO.get(id).fetch(new Request(req, { headers: h }))
+  },
+} satisfies ExportedHandler<Env>
 ```
+
+### 3. Use it from the browser
+
+```ts
+import { createCollection } from "@tanstack/db"
+import { useLiveQuery } from "@tanstack/react-db"
+import { doCollectionOptions, WebSocketTransport } from "tanstack-do-db-collection/client"
+import { ulid } from "ulid"
+
+const transport = new WebSocketTransport({ url: `wss://${host}/sync/${sessionId}` })
+const messages = createCollection(
+  doCollectionOptions<Message>({ transport, table: "messages", getKey: (m) => m.id }),
+)
+
+function ChatRoom({ userId }: { userId: string }) {
+  const { data } = useLiveQuery((q) => q.from({ m: messages }).orderBy(({ m }) => m.created_at, "asc"))
+  const send = (content: string) =>
+    // Optimistic; resolves once the server confirms on the single stream.
+    messages.insert({ id: ulid(), author: userId, content, created_at: Date.now() })
+  return <ChatView rows={data} onSend={send} />
+}
+```
+
+One `WebSocketTransport` per DO is shared by every collection on that DO
+(multiplexed over the single socket). Pass `where` to
+`doCollectionOptions` to sync only a matching subset.
 
 ---
 

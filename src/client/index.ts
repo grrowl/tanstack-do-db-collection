@@ -1,11 +1,12 @@
 // tanstack-do-db-collection/client — browser entry.
 //
-// The TanStack DB collection-options creator and WebSocket transport. Imports
-// `@tanstack/db` for types only; no @tanstack/db runtime dependency here.
+// The TanStack DB collection-options creator and WebSocket transport. Depends
+// on `@tanstack/db` (a peer): types throughout, plus its predicate compiler at
+// runtime for the where-filter preflight.
 //
-// Surface lands across milestones M3–M9 (see docs/adr/):
-//   - WebSocketTransport: one per DO; single appliedSeq cursor; awaitSeq   (M3)
-//   - doCollectionOptions: build a TanStack DB CollectionConfig            (M3)
+//   - WebSocketTransport: one per DO; single appliedSeq cursor; awaitSeq.
+//   - doCollectionOptions: build a TanStack DB CollectionConfig, optionally
+//     server-filtered by a `where` predicate.
 
 export {
   MutationRejectedError,
