@@ -1,0 +1,59 @@
+// Wire protocol frames (ADR-0001 §single-ordered-stream, ADR-0002 §2).
+// Shared by the Durable Object server and the browser client.
+//
+// One ordered stream per DO. The client tracks a single cursor (appliedSeq);
+// `seq` is opaque (a stringified bigint). Confirmation rides on the same stream
+// as data — `committed`/`rejected` correlate to a client `txId`; there is no
+// second ack channel (ADR-0002 C1).
+//
+// Predicate/order fields are typed `unknown` here and tightened to the
+// @tanstack/db expression IR in M5.
+
+export type Cursor = string
+export type TxId = string
+export type RowOp = "insert" | "update" | "delete"
+
+/** Placeholder for the @tanstack/db BasicExpression IR (tightened in M5). */
+export type WireExpression = unknown
+export type WireOrderBy = unknown
+
+/** One row operation inside a `mut` frame. `cols` is a getChanges() diff; for
+ *  an insert it is the full row (ADR-0001 D19). */
+export interface MutOp {
+  type: RowOp
+  key: unknown
+  cols?: Record<string, unknown>
+}
+
+export type ClientFrame =
+  | {
+      t: "sub"
+      subId: string
+      collection: string
+      where?: WireExpression
+      orderBy?: WireOrderBy
+      limit?: number
+      offset?: number
+      cursor?: WireExpression
+      since?: Cursor
+    }
+  | { t: "unsub"; subId: string }
+  | { t: "mut"; txId: TxId; collection: string; ops: Array<MutOp> }
+  | { t: "call"; txId: TxId; name: string; args: unknown }
+
+export type ServerFrame =
+  // Snapshot rows (full row) then a boundary; client truncates + applies.
+  | { t: "snap"; sub: string; key: unknown; row: unknown; seq: Cursor }
+  | { t: "snap-end"; sub: string; seq: Cursor }
+  // Live delta; `cols` is a partial (top-level) patch, absent for delete.
+  | { t: "d"; sub: string; key: unknown; op: RowOp; cols?: Record<string, unknown>; seq: Cursor }
+  // Batch boundary — client commits the buffered sync transaction here.
+  | { t: "uptodate"; seq: Cursor }
+  // Mutation receipt (the no-subscription-match path lives here; ADR-0002 C1/C2).
+  | { t: "committed"; txId: TxId; seq: Cursor; result?: unknown }
+  | { t: "rejected"; txId: TxId; error: { code?: string; message: string } }
+  // Compaction/rotation reset — client truncates and resnapshots (ADR-0002 C5).
+  | { t: "reset"; sub?: string }
+
+export type Frame = ClientFrame | ServerFrame
+export type FrameTag = Frame["t"]
