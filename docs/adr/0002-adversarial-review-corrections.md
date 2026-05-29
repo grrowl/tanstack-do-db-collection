@@ -99,10 +99,19 @@ the sync adapter under eager sync (it filters client-side after a full-table
 sync). Electric's adapter likewise provides no `loadSubset` in eager mode
 (`electric.ts:422-425`).
 
-**Correction.** Filtered / subset collections default to
-`syncMode: 'on-demand'`; eager mode is documented as full-table sync with
-client-side filtering only. M5/M6 must include a test of a plain
-`useLiveQuery(... where ...)` to prove predicates reach the server.
+**Correction.** Two distinct mechanisms, split across milestones:
+- **M5 — static collection-level `where`.** `doCollectionOptions({ where })`
+  sends the predicate on the `sub` frame directly (not via `loadSubset`), so it
+  works regardless of `syncMode`. A synchronous write-outside-filter preflight
+  (`WriteOutsideSubError`) rejects writes whose row wouldn't match, *preventing*
+  the out-of-filter phantom rather than cleaning it up. Because every accepted
+  write is in-view, the no-subscription-match path is not exercised here.
+- **M6 — dynamic `loadSubset` windows** (`syncMode: 'on-demand'`,
+  orderBy/limit/cursor). Here a confirmed write can legitimately fall outside
+  all currently-loaded windows (e.g. inserting outside the visible page), which
+  the preflight cannot catch — so **the empty-commit must-verify (C2) is
+  answered and applied in M6**, not M5. M6 must test a live query whose `where`
+  reaches `loadSubset` (eager bypasses it — verified, sync.ts:482-486).
 
 ### C4 — Drop the before-image column from the base design
 

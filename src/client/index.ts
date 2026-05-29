@@ -12,5 +12,5 @@ export {
   WebSocketTransport,
 } from "./transport.ts"
 export type { SubHandler, TransportOptions, WebSocketLike } from "./transport.ts"
-export { doCollectionOptions } from "./do-collection.ts"
+export { doCollectionOptions, WriteOutsideSubError } from "./do-collection.ts"
 export type { DoCollectionOptions } from "./do-collection.ts"

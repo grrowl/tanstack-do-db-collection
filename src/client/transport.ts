@@ -132,10 +132,10 @@ export class WebSocketTransport {
     this.connectPromise = null
   }
 
-  async subscribe(subId: string, collection: string, handler: SubHandler): Promise<void> {
+  async subscribe(subId: string, collection: string, handler: SubHandler, where?: unknown): Promise<void> {
     this.handlers.set(subId, { handler, collection })
     await this.connect()
-    this.sendFrame({ t: "sub", subId, collection })
+    this.sendFrame({ t: "sub", subId, collection, where })
   }
 
   unsubscribe(subId: string): void {
