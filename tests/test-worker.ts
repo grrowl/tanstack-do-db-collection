@@ -1,9 +1,10 @@
 // Test worker entry — declares the DO classes bound by vitest.config's
-// miniflare.durableObjects. Grows as milestones add behaviour to exercise.
+// miniflare.durableObjects. Tests drive storage directly via
+// `runInDurableObject`, so the DO stays bare; per-test schema setup lives in
+// the tests. Gains a real registry + WebSocket lifecycle as milestones land.
 
 import { DurableObject } from "cloudflare:workers"
 
-/** Minimal DO; gains a sync-do registry + collections as milestones land. */
 export class TestDO extends DurableObject {}
 
 export default {
