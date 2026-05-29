@@ -1,11 +1,29 @@
 // In-memory subscription registry, keyed by WebSocket. Subscriptions live in
 // memory only — they are lost on hibernation and re-established by the client's
-// `resub` on reconnect (M7). For M3 a subscription is just (subId, collection);
-// predicates/shaping arrive in M5/M6.
+// `resub` on reconnect (M7).
+//
+// A subscription carries an optional `where` predicate IR (M5). It is compiled
+// with @tanstack/db's own evaluator so server-side filtering matches the
+// client's operator semantics exactly (no second predicate implementation).
+
+import { compileSingleRowExpression, toBooleanPredicate } from "@tanstack/db"
 
 export interface Sub {
   subId: string
   collection: string
+  /** Predicate IR as it arrived on the wire (BasicExpression), if filtered. */
+  where?: unknown
+  /** Compiled row test; always-true for an unfiltered subscription. */
+  predicate: (row: Record<string, unknown>) => boolean
+}
+
+function compilePredicate(where: unknown): (row: Record<string, unknown>) => boolean {
+  if (where === undefined || where === null) return () => true
+  const evaluate = compileSingleRowExpression(where as never) as (
+    row: Record<string, unknown>,
+  ) => boolean | null
+  // toBooleanPredicate collapses SQL 3-valued null to false, matching SQL.
+  return (row) => toBooleanPredicate(evaluate(row))
 }
 
 export class SubscriptionRegistry {
@@ -13,8 +31,8 @@ export class SubscriptionRegistry {
   // Reverse index for delta fan-out by collection (used from M3's write path).
   private readonly wsByCollection = new Map<string, Set<WebSocket>>()
 
-  add(ws: WebSocket, subId: string, collection: string): Sub {
-    const sub: Sub = { subId, collection }
+  add(ws: WebSocket, subId: string, collection: string, where?: unknown): Sub {
+    const sub: Sub = { subId, collection, where, predicate: compilePredicate(where) }
     let m = this.subsByWs.get(ws)
     if (!m) {
       m = new Map()

@@ -122,10 +122,12 @@ also relieves the write-amplification concern the review raised against
 before-image. Before-image becomes a deferred optimization, revisited only if
 delete fan-out is measured as a real cost.
 
-> **M5 must verify** the client sync path treats `write({ type: 'insert' })` for
-> an absent key as an upsert (the move-in case). If it does not, the DO must
-> emit `update` vs `insert` correctly — which *would* require before-image or
-> membership state, reopening this decision.
+> **Verified in M5** (tests/tanstack-upsert-probe.test.ts): a sync
+> `write({ type: 'update' })` for an absent key UPSERTS in @tanstack/db. So the
+> server may emit the actual change op on move-in (no need to distinguish
+> insert vs update, no before-image, no per-sub membership). The always-emit
+> rule stands: matching live row -> its current state with the actual op;
+> otherwise -> idempotent synthetic delete.
 
 ### C5 — Compaction and dedup GC must respect liveness
 

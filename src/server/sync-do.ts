@@ -277,7 +277,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       for (const { ws, sub } of this.subs.forCollection(tbl)) {
         for (const [key, change] of latest) {
           const row = hydrated.get(key)
-          if (change.op === "delete" || !row) {
+          // Always-emit rule (no before-image, ADR-0002 C4): a key that is
+          // deleted, gone, or no longer matches this sub's predicate -> a
+          // synthetic delete (idempotent; move-out). A matching live row ->
+          // its current state with the actual op (move-in via update upserts
+          // on the client — verified). Predicate is always-true when unfiltered.
+          if (change.op === "delete" || !row || !sub.predicate(row)) {
             this.broadcaster.enqueue(ws, { subId: sub.subId, key, op: "delete" }, cursor)
           } else {
             // Full row as the partial patch; column-level diffs arrive later.
@@ -300,10 +305,10 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       this.send(ws, { t: "reset", sub: frame.subId })
       return
     }
-    this.subs.add(ws, frame.subId, frame.collection)
+    const sub = this.subs.add(ws, frame.subId, frame.collection, frame.where)
     const seq = String(currentSeq(this.sql))
     for (const row of snapshotAll(this.sql, frame.collection)) {
-      this.send(ws, { t: "snap", sub: frame.subId, key: row[coll.pk], row, seq })
+      if (sub.predicate(row)) this.send(ws, { t: "snap", sub: frame.subId, key: row[coll.pk], row, seq })
     }
     this.send(ws, { t: "snap-end", sub: frame.subId, seq })
   }
