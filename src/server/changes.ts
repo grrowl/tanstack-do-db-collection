@@ -83,6 +83,14 @@ export function currentSeq(sql: SqlStorage): number {
   return Number(rows[0]?.s ?? 0)
 }
 
+/** Lowest `seq` still in the log — the retention floor for reconnect catch-up. */
+export function minChangeSeq(sql: SqlStorage): number {
+  const rows = Array.from(
+    sql.exec<{ s: number | null }>("SELECT MIN(seq) AS s FROM _sync_changes"),
+  )
+  return Number(rows[0]?.s ?? 0)
+}
+
 /** The "highest seq we've broadcast" watermark. */
 export function getDrainCursor(sql: SqlStorage): number {
   const rows = Array.from(

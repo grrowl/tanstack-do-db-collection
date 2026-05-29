@@ -22,6 +22,7 @@ import {
   hydrateRows,
   initSchema,
   installTriggers,
+  minChangeSeq,
   readChangesSince,
   setDrainCursor,
 } from "./changes.ts"
@@ -324,13 +325,53 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       throw e
     }
 
-    this.subs.add(ws, frame.subId, frame.collection, frame.where)
+    const sub = this.subs.add(ws, frame.subId, frame.collection, frame.where)
     const seq = String(currentSeq(this.sql))
+
+    // Reconnect catch-up: a `since` cursor asks for changes after that point
+    // rather than a fresh snapshot. Serve a windowed delta while the change log
+    // still reaches back that far; otherwise fall back to reset + snapshot
+    // (the retention floor; exercised once compaction prunes — M7 next).
+    const since = frame.since != null ? Number(frame.since) : 0
+    if (since > 0) {
+      const floor = minChangeSeq(this.sql)
+      if (floor === 0 || since >= floor - 1) {
+        this.emitCatchUp(ws, sub, coll, since, seq)
+        return
+      }
+      this.send(ws, { t: "reset", sub: frame.subId })
+    }
+
     const rows = Array.from(this.sql.exec(query.sql, ...query.params)) as Array<Record<string, SqlStorageValue>>
     for (const row of rows) {
       this.send(ws, { t: "snap", sub: frame.subId, key: row[coll.pk], row, seq })
     }
     this.send(ws, { t: "snap-end", sub: frame.subId, seq })
+  }
+
+  /** Windowed catch-up: the latest op per changed key since `since`, resolved
+   *  through the sub's predicate (move-in/out), then an `uptodate` boundary. */
+  private emitCatchUp(
+    ws: WebSocket,
+    sub: { subId: string; predicate: (row: Record<string, unknown>) => boolean },
+    coll: { table: string; pk: string },
+    since: number,
+    seq: string,
+  ): void {
+    const changes = readChangesSince(this.sql, since).filter((c) => c.tbl === coll.table)
+    const latest = new Map<string, (typeof changes)[number]>()
+    for (const c of changes) latest.set(c.key, c)
+    const liveKeys = [...latest.values()].filter((c) => c.op !== "delete").map((c) => c.key)
+    const hydrated = hydrateRows(this.sql, coll.table, coll.pk, liveKeys)
+    for (const [key, change] of latest) {
+      const row = hydrated.get(key)
+      if (change.op === "delete" || !row || !sub.predicate(row)) {
+        this.send(ws, { t: "d", sub: sub.subId, key, op: "delete", seq })
+      } else {
+        this.send(ws, { t: "d", sub: sub.subId, key, op: change.op, cols: row, seq })
+      }
+    }
+    this.send(ws, { t: "uptodate", seq })
   }
 
   /** Encode and send a server frame on one socket. */

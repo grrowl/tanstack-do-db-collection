@@ -53,6 +53,9 @@ export interface TransportOptions {
   codec?: FrameCodec
   /** Confirmation/await timeout in ms. */
   timeoutMs?: number
+  /** Delay before an auto-reconnect attempt after an unexpected drop (ms).
+   *  Fixed for now; production should layer exponential backoff + jitter. */
+  reconnectDelayMs?: number
 }
 
 interface SeqWaiter {
@@ -75,14 +78,20 @@ export class WebSocketTransport {
   private readonly timeoutMs: number
   private readonly open: () => WebSocketLike | Promise<WebSocketLike>
 
-  private readonly handlers = new Map<string, { handler: SubHandler; collection: string }>()
+  private readonly handlers = new Map<string, { handler: SubHandler; collection: string; where?: unknown }>()
   private appliedSeq = 0n
   private readonly seqWaiters: Array<SeqWaiter> = []
   private readonly pendingTx = new Map<string, TxWaiter>()
+  /** Suppresses auto-reconnect after an intentional close(). */
+  private intentionallyClosed = false
+  /** True while reconnecting, so connect() resubscribes on success. */
+  private reconnecting = false
+  private readonly reconnectDelayMs: number
 
   constructor(opts: TransportOptions) {
     this.codec = opts.codec ?? createFrameCodec()
     this.timeoutMs = opts.timeoutMs ?? 5000
+    this.reconnectDelayMs = opts.reconnectDelayMs ?? 250
     this.open =
       opts.open ??
       (() =>
@@ -107,13 +116,37 @@ export class WebSocketTransport {
       ws.addEventListener("close", () => {
         this.ws = null
         this.connectPromise = null
+        // Auto-reconnect on an unexpected drop while subscriptions are active.
+        if (!this.intentionallyClosed && this.handlers.size > 0) {
+          setTimeout(() => {
+            this.reconnecting = true
+            void this.connect().catch(() => {
+              /* next attempt retries on the following close */
+            })
+          }, this.reconnectDelayMs)
+        }
       })
       this.ws = ws
+      // On a reconnect, re-establish every subscription from our single applied
+      // cursor so the server serves a windowed catch-up rather than a snapshot.
+      if (this.reconnecting) {
+        this.reconnecting = false
+        this.resubscribeAll()
+      }
     })()
     return this.connectPromise
   }
 
+  /** Re-send a `sub` for every registered subscription, carrying `since`. */
+  private resubscribeAll(): void {
+    const since = this.appliedCursor
+    for (const [subId, entry] of this.handlers) {
+      this.sendFrame({ t: "sub", subId, collection: entry.collection, where: entry.where, since })
+    }
+  }
+
   close(): void {
+    this.intentionallyClosed = true
     for (const w of this.seqWaiters.splice(0)) {
       clearTimeout(w.timer)
       w.reject(new Error("transport closed"))
@@ -133,7 +166,7 @@ export class WebSocketTransport {
   }
 
   async subscribe(subId: string, collection: string, handler: SubHandler, where?: unknown): Promise<void> {
-    this.handlers.set(subId, { handler, collection })
+    this.handlers.set(subId, { handler, collection, where })
     await this.connect()
     this.sendFrame({ t: "sub", subId, collection, where })
   }
