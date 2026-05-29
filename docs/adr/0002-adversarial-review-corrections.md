@@ -72,6 +72,15 @@ relies on the next `up-to-date` sync commit to clear stale direct upserts —
 boundary carries the delta; for a no-subscription-match write it is empty and
 exists solely to run the clear path.
 
+> **VERIFIED** (tests/empty-commit-probe.test.ts): an empty `begin()/commit()`
+> after the transaction completes DOES run the clear path and drops a confirmed
+> no-match direct upsert (`get` returns undefined). For an in-view write the
+> same empty commit is a no-op on the visible row — the key is still in synced
+> state, so `state.ts:1170`'s `!currentVisibleState.has(key)` guard keeps it.
+> So a single post-mutation empty commit is safe for both cases; no targeted
+> delete needed. Wired into the adapter + integration-tested when on-demand
+> windows (which create the reachable no-match case) land.
+
 > **Reachability (refined during M3):** the stranded-direct-upsert case only
 > arises when a client writes a row that lands in **no active subscription**.
 > Under full-collection sync (M3) a client that can call `insert` is, by
