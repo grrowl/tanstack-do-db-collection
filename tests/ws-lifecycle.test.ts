@@ -1,16 +1,12 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
-import { createFrameCodec } from "../src/wire/frame-codec.ts"
-import type { ServerFrame } from "../src/wire/frames.ts"
 
 // WHY: the lifecycle is the load-bearing transport. These drive a real
 // WebSocket through workerd end to end. They pin: the upgrade contract, the
-// no-wake ping/pong heartbeat, binary frame fidelity over the actual socket,
-// and that identity is bound to the socket via serializeAttachment — the
-// mechanism that lets the DO hibernate and wake without losing who is who
-// (ADR-0001 D13).
-
-const codec = createFrameCodec() // binary, as in production
+// no-wake ping/pong heartbeat, and that identity is bound to the socket via
+// serializeAttachment — the mechanism that lets the DO hibernate and wake
+// without losing who is who (ADR-0001 D13). Frame round-trips over the wire
+// are covered by the read-path tests (sync-read.test.ts).
 
 async function openWs(path: string, headers: Record<string, string> = {}): Promise<WebSocket> {
   const res = await SELF.fetch(`https://example.com${path}`, {
@@ -47,19 +43,6 @@ describe("SyncDurableObject WebSocket lifecycle (M2)", () => {
     const ws = await openWs("/sync/room-ping")
     ws.send("ping")
     expect(await nextMessage(ws)).toBe("pong")
-    ws.close()
-  })
-
-  it("decodes a client frame and round-trips a server frame over the wire", async () => {
-    const ws = await openWs("/sync/room-echo")
-    ws.send(codec.encode({ t: "call", txId: "tx1", name: "echo", args: { hi: 5, when: new Date(0) } }))
-    const frame = codec.decode(await nextMessage(ws)) as ServerFrame
-    expect(frame.t).toBe("committed")
-    if (frame.t === "committed") {
-      expect(frame.txId).toBe("tx1")
-      // Date fidelity proves the binary codec survives the real socket.
-      expect(frame.result).toEqual({ hi: 5, when: new Date(0) })
-    }
     ws.close()
   })
 

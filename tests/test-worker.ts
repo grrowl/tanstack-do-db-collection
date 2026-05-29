@@ -4,7 +4,6 @@
 import { DurableObject } from "cloudflare:workers"
 import { Registry } from "../src/server/registry.ts"
 import { SyncDurableObject } from "../src/server/sync-do.ts"
-import type { ClientFrame } from "../src/wire/frames.ts"
 
 /** Bare DO for the M1 CDC tests; they drive storage via runInDurableObject. */
 export class TestDO extends DurableObject {}
@@ -13,9 +12,9 @@ interface Claims {
   userId: string
 }
 
-/** Exercises the M2 WebSocket lifecycle. Echoes a `call` named "echo" back as a
- *  `committed` frame so tests can assert the full wire round-trip through the
- *  real DO. Real sub/mut/call dispatch lands in M3. */
+/** Sync DO exercised by the WS lifecycle (M2) and read-path (M3) tests. The
+ *  framework owns sub/mut/call dispatch; the subclass only declares its
+ *  collections (mutations/commands arrive with the write-path increment). */
 export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
   protected registry = new Registry().defineCollection({
     table: "messages",
@@ -25,12 +24,6 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
 
   protected override parseAttachment(req: Request): Claims {
     return { userId: req.headers.get("x-user") ?? "anon" }
-  }
-
-  protected override onFrame(ws: WebSocket, frame: ClientFrame): void {
-    if (frame.t === "call" && frame.name === "echo") {
-      this.send(ws, { t: "committed", txId: frame.txId, seq: "0", result: frame.args })
-    }
   }
 }
 

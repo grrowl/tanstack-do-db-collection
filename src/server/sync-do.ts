@@ -16,8 +16,9 @@ import { DurableObject } from "cloudflare:workers"
 import type { SqlStorage } from "@cloudflare/workers-types"
 import { createFrameCodec, type FrameCodec } from "../wire/frame-codec.ts"
 import type { ClientFrame, ServerFrame } from "../wire/frames.ts"
-import { initSchema, installTriggers } from "./changes.ts"
+import { currentSeq, initSchema, installTriggers, snapshotAll } from "./changes.ts"
 import type { Registry } from "./registry.ts"
+import { SubscriptionRegistry } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
   /** Subclasses declare their collections (and, from M3, mutations/commands). */
@@ -26,6 +27,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   /** Wire codec. Binary MessagePack by default; override for a JSON transport. */
   protected readonly codec: FrameCodec = createFrameCodec()
 
+  protected readonly subs = new SubscriptionRegistry()
   private readonly liveWs = new Set<WebSocket>()
   private schemaReady = false
 
@@ -94,23 +96,63 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     } catch {
       return // ignore undecodable frames
     }
-    await this.onFrame(ws, frame)
+    await this.dispatch(ws, frame)
   }
 
   override webSocketClose(ws: WebSocket): void {
+    this.subs.removeAll(ws)
     this.liveWs.delete(ws)
   }
 
   override webSocketError(ws: WebSocket): void {
+    this.subs.removeAll(ws)
     this.liveWs.delete(ws)
   }
 
-  /**
-   * Handle a decoded client frame. Default is a no-op; M3 implements the
-   * sub/mut/call dispatch in the framework. Subclasses generally do not
-   * override this directly once M3 lands.
-   */
-  protected onFrame(_ws: WebSocket, _frame: ClientFrame): void | Promise<void> {}
+  private async dispatch(ws: WebSocket, frame: ClientFrame): Promise<void> {
+    switch (frame.t) {
+      case "sub":
+        return this.handleSub(ws, frame)
+      case "unsub":
+        this.subs.remove(ws, frame.subId)
+        return
+      // mut/call land in the next M3 increment (apply + single-stream
+      // confirmation). Reject explicitly so a client gets a clear signal
+      // rather than a silent hang.
+      case "mut":
+        this.send(ws, {
+          t: "rejected",
+          txId: frame.txId,
+          error: { code: "UNIMPLEMENTED", message: "mutations land in the next increment" },
+        })
+        return
+      case "call":
+        this.send(ws, {
+          t: "rejected",
+          txId: frame.txId,
+          error: { code: "UNIMPLEMENTED", message: "commands land in the next increment" },
+        })
+        return
+    }
+  }
+
+  /** Full-collection subscribe: emit every current row as a snapshot, then a
+   *  boundary. Predicate/subset shaping arrives in M5/M6. */
+  private handleSub(ws: WebSocket, frame: Extract<ClientFrame, { t: "sub" }>): void {
+    const coll = this.registry.collections.get(frame.collection)
+    if (!coll) {
+      // Unknown collection: drop the subscriber's view. Richer sub-error
+      // signalling is deferred; for now reset is the honest minimum.
+      this.send(ws, { t: "reset", sub: frame.subId })
+      return
+    }
+    this.subs.add(ws, frame.subId, frame.collection)
+    const seq = String(currentSeq(this.sql))
+    for (const row of snapshotAll(this.sql, frame.collection)) {
+      this.send(ws, { t: "snap", sub: frame.subId, key: row[coll.pk], row, seq })
+    }
+    this.send(ws, { t: "snap-end", sub: frame.subId, seq })
+  }
 
   /** Encode and send a server frame on one socket. */
   protected send(ws: WebSocket, frame: ServerFrame): void {

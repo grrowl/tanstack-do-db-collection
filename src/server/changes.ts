@@ -9,7 +9,7 @@
 // No before-image column: move-in/move-out is computed at emit time from the
 // current row + the subscription predicate (ADR-0002 C4).
 
-import type { SqlStorage } from "@cloudflare/workers-types"
+import type { SqlStorage, SqlStorageValue } from "@cloudflare/workers-types"
 
 export const SYNC_PREFIX = "_sync_"
 
@@ -97,4 +97,9 @@ export function readChangesSince(sql: SqlStorage, cursor: number): Array<ChangeR
       cursor,
     ),
   )
+}
+
+/** Every current row of a collection table — the initial-subscribe snapshot. */
+export function snapshotAll(sql: SqlStorage, tbl: string): Array<Record<string, SqlStorageValue>> {
+  return Array.from(sql.exec<Record<string, SqlStorageValue>>(`SELECT * FROM ${tbl}`))
 }
