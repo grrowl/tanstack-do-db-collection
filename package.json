@@ -1,0 +1,45 @@
+{
+  "name": "tanstack-do-db-collection",
+  "version": "0.0.1",
+  "description": "Sync a TanStack DB collection to a Cloudflare Durable Object over WebSockets — optimistic mutations, live queries, and single-ordered-stream write confirmation.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Tom McKenzie",
+  "keywords": [
+    "tanstack-db",
+    "cloudflare",
+    "durable-objects",
+    "sync",
+    "local-first",
+    "websocket",
+    "optimistic",
+    "live-query"
+  ],
+  "main": "src/server/index.ts",
+  "types": "src/server/index.ts",
+  "exports": {
+    ".": "./src/server/index.ts",
+    "./client": "./src/client/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "peerDependencies": {
+    "@tanstack/db": ">=0.6.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.12.21",
+    "@cloudflare/workers-types": "^4.20260518.1",
+    "@tanstack/db": "0.6.5",
+    "typescript": "^5.7",
+    "vitest": "3.2.4",
+    "wrangler": "^4"
+  }
+}
