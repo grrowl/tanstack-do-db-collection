@@ -3,16 +3,17 @@
 //
 // Maps the transport's frame callbacks onto TanStack DB's sync API
 // (begin/write/commit/markReady/truncate) and wraps mutations as `mut` frames
-// confirmed on the single ordered stream (sendMut resolves on `committed`,
-// which — given server-side C1 ordering — implies the confirming delta is
-// already applied).
+// confirmed on the single ordered stream.
 //
-// Optional `where` (M5): a @tanstack/db BasicExpression IR. It is sent on the
-// `sub` frame so the server ships only matching rows, and compiled locally to
-// preflight writes — an insert/update whose resulting row wouldn't match the
-// filter throws WriteOutsideSubError synchronously (preventing an out-of-filter
-// optimistic phantom). Move-out of matching rows is handled by the server's
-// synthetic delete.
+// Two sync modes:
+//   - 'eager' (default): subscribe to the whole collection (optionally filtered
+//     by a static `where`) up front. A `where` also preflights writes.
+//   - 'on-demand': sync nothing up front; the collection calls loadSubset(where)
+//     as live queries mount, and unloadSubset when they unmount. Each distinct
+//     `where` is one refcounted server subscription; ordering/limit are applied
+//     client-side by IVM over the loaded rows. Writes that land outside every
+//     loaded subset are confirmed and their optimistic overlay retired by a
+//     post-mutation empty sync commit (ADR-0002 C2, verified).
 
 import { compileSingleRowExpression, toBooleanPredicate, type CollectionConfig } from "@tanstack/db"
 import type { MutOp, RowOp } from "../wire/frames.ts"
@@ -36,12 +37,15 @@ export interface DoCollectionOptions<T extends object> {
   getKey: (row: T) => string
   /** Collection id; defaults to the table name. */
   id?: string
-  /** Optional server-side filter (a @tanstack/db BasicExpression IR). Set once
-   *  at construction; also preflights writes. */
+  /**
+   * 'eager' (default) syncs the whole collection (optionally filtered by
+   * `where`). 'on-demand' syncs only the subsets that live queries request.
+   */
+  syncMode?: "eager" | "on-demand"
+  /** Eager-mode server-side filter + write preflight (a @tanstack/db IR). */
   where?: unknown
 }
 
-/** Minimal shape we read from a TanStack DB PendingMutation. */
 interface PendingMutationLike {
   type: RowOp
   key: string
@@ -49,13 +53,20 @@ interface PendingMutationLike {
   changes: unknown
 }
 
-/** Minimal shape of the sync params we depend on (subset of SyncConfig.sync). */
 interface SyncParams {
   begin: (options?: { immediate?: boolean }) => void
   write: (message: { type: RowOp; value?: unknown; key?: string }) => void
   commit: () => void
   markReady: () => void
   truncate: () => void
+}
+
+/** Subset of @tanstack/db's LoadSubsetOptions we consume (where-based v1). */
+interface LoadSubsetOptions {
+  where?: unknown
+  orderBy?: unknown
+  limit?: number
+  offset?: number
 }
 
 function compilePredicate(where: unknown): (row: Record<string, unknown>) => boolean {
@@ -70,10 +81,14 @@ export function doCollectionOptions<T extends object>(
   opts: DoCollectionOptions<T>,
 ): CollectionConfig<T, string> {
   const { transport, table, getKey, where } = opts
-  const subId = `${table}#${++subSeq}`
+  const syncMode = opts.syncMode ?? "eager"
+  const eagerSubId = `${table}#${++subSeq}`
   const matches = compilePredicate(where)
 
-  const sync = (params: SyncParams): (() => void) => {
+  // Set by sync(); used by mutationFn to retire no-subset-match optimistic rows.
+  let emptyCommit: (() => void) | null = null
+
+  const sync = (params: SyncParams): SyncConfigResult => {
     const { begin, write, commit, markReady, truncate } = params
     let open = false
     const ensureBegin = (): void => {
@@ -88,15 +103,20 @@ export function doCollectionOptions<T extends object>(
         open = false
       }
     }
+    emptyCommit = (): void => {
+      flush()
+      begin()
+      commit() // a standalone empty boundary; runs the direct-upsert clear path
+    }
 
-    const handler: SubHandler = {
+    const makeHandler = (onReady: () => void): SubHandler => ({
       onSnap: (_key, row) => {
         ensureBegin()
         write({ type: "insert", value: row })
       },
       onSnapEnd: () => {
         flush()
-        markReady()
+        onReady()
       },
       onDelta: (op, key, cols) => {
         ensureBegin()
@@ -110,19 +130,56 @@ export function doCollectionOptions<T extends object>(
         truncate()
         commit()
       },
+    })
+
+    if (syncMode === "on-demand") {
+      // Ready as soon as connected; data arrives per loadSubset.
+      void transport.connect().then(() => markReady())
+      // Distinct `where` -> one refcounted server subscription.
+      const loaded = new Map<string, { subId: string; refs: number; ready: Promise<void> }>()
+      const keyOf = (o: LoadSubsetOptions): string => JSON.stringify(o.where ?? null)
+
+      const loadSubset = (o: LoadSubsetOptions): true | Promise<void> => {
+        const key = keyOf(o)
+        const existing = loaded.get(key)
+        if (existing) {
+          existing.refs++
+          return existing.ready
+        }
+        let resolve!: () => void
+        const ready = new Promise<void>((r) => {
+          resolve = r
+        })
+        const subId = `${table}#${key}`
+        loaded.set(key, { subId, refs: 1, ready })
+        void transport.subscribe(subId, table, makeHandler(resolve), o.where)
+        return ready
+      }
+
+      const unloadSubset = (o: LoadSubsetOptions): void => {
+        const key = keyOf(o)
+        const entry = loaded.get(key)
+        if (entry && --entry.refs <= 0) {
+          transport.unsubscribe(entry.subId)
+          loaded.delete(key)
+        }
+      }
+
+      return { loadSubset, unloadSubset, cleanup: () => transport.close() }
     }
 
-    void transport.subscribe(subId, table, handler, where)
-    return () => transport.unsubscribe(subId)
+    // eager
+    void transport.subscribe(eagerSubId, table, makeHandler(markReady), where)
+    return () => transport.unsubscribe(eagerSubId)
   }
 
   const mutationFn = async (params: {
     transaction: { id: string; mutations: ReadonlyArray<PendingMutationLike> }
   }): Promise<void> => {
     const ops: Array<MutOp> = params.transaction.mutations.map((m) => {
-      // Preflight: a write whose resulting row falls outside this collection's
-      // filter would never be confirmed by a delta — reject before any I/O.
-      if (m.type !== "delete" && !matches(m.modified as Record<string, unknown>)) {
+      // Eager filtered preflight: a write outside the static `where` would never
+      // be confirmed by a delta — reject before any I/O.
+      if (where != null && m.type !== "delete" && !matches(m.modified as Record<string, unknown>)) {
         throw new WriteOutsideSubError(
           `write to '${table}' (key '${m.key}') falls outside the collection's where filter`,
         )
@@ -139,14 +196,33 @@ export function doCollectionOptions<T extends object>(
       }
     })
     await transport.sendMut({ t: "mut", txId: params.transaction.id, collection: table, ops })
+
+    // On-demand: a confirmed write may land outside every loaded subset, so no
+    // delta clears its direct optimistic upsert. A post-mutation empty sync
+    // commit (after the tx completes) retires it; for an in-view write it is a
+    // no-op (the synced row keeps it). See ADR-0002 C2.
+    if (syncMode === "on-demand" && emptyCommit) {
+      const run = emptyCommit
+      setTimeout(() => run(), 0)
+    }
   }
 
   return {
     id: opts.id ?? table,
     getKey,
+    syncMode,
     sync: { sync, rowUpdateMode: "partial" },
     onInsert: mutationFn,
     onUpdate: mutationFn,
     onDelete: mutationFn,
   } as unknown as CollectionConfig<T, string>
 }
+
+/** What our sync() returns: a cleanup fn (eager) or the on-demand handlers. */
+type SyncConfigResult =
+  | (() => void)
+  | {
+      loadSubset: (o: LoadSubsetOptions) => true | Promise<void>
+      unloadSubset: (o: LoadSubsetOptions) => void
+      cleanup: () => void
+    }

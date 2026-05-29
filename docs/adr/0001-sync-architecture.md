@@ -152,14 +152,17 @@ interleave so every milestone is end-to-end demonstrable.
 - **M4** — Egress coalescer (server).
 - **M5** — Filtered subscriptions + IR predicate engine (both); move-in/out via
   before-image.
-- **M6** — Subset shaping (both). **v1 scope: static subset shaping** —
-  `where`/`orderBy`/`limit`/`offset` lowered into SQLite on the `sub` frame
-  (done), with un-lowerable predicates rejected (D6). **Deferred to post-v1:**
-  dynamic per-live-query `loadSubset`/on-demand windows, cursor double-request
-  pagination, and `isWhereSubset` subset dedup. These are an advanced
-  optimization over the static path; the empty-commit no-window-match clearing
-  (verified, ADR-0002 C2) is wired when they land. Not silently dropped —
-  recorded here as a deliberate v1 boundary.
+- **M6** — Subset shaping (both). Static subset shaping —
+  `where`/`orderBy`/`limit`/`offset` lowered into SQLite on the `sub` frame,
+  with un-lowerable predicates rejected (D6).
+- **M11** — Dynamic **on-demand** subsets (client, where-based). `doCollection
+  Options({ syncMode: 'on-demand' })`: the collection loads only the subsets its
+  live-query `where` clauses request (each distinct `where` is one refcounted
+  server sub; ordering/limit applied client-side by IVM), with the empty-commit
+  no-subset-match clearing wired (ADR-0002 C2). **Deferred post-v1:** windowed
+  pagination (`orderBy`/`limit`/cursor double-request with server-side window
+  maintenance under churn) and `isWhereSubset` containment dedup — recorded as a
+  deliberate v1 boundary, not silently dropped.
 - **M7** — Compaction-defined retention + reconnect (both).
 - **M8** — Multi-collection multiplexing + client IVM integration (both).
 - **M9** — Hardening, publish build, and OSS polish.

@@ -11,8 +11,9 @@
 > subscriptions, subset shaping, reconnect catch-up, compaction, multiplexing,
 > client IVM). The API may still shift before 1.0. Built in the open — see
 > [`docs/adr/`](./docs/adr/) for the decisions and `git log` for the path.
-> Deferred post-v1: dynamic on-demand `loadSubset` windows + subset dedup
-> (static subset shaping ships now).
+> On-demand subsets ship (`syncMode: 'on-demand'` — load only the subsets your
+> queries request). Deferred post-v1: windowed pagination
+> (`orderBy`/`limit`/cursor with server-side window maintenance).
 
 The Durable Object owns the data. The browser runs a TanStack DB collection
 against it. This library moves the diffs — and nothing more than the diffs.
