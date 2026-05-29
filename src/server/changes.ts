@@ -38,6 +38,15 @@ export function initSchema(sql: SqlStorage): void {
             )`)
   sql.exec(`CREATE INDEX IF NOT EXISTS _sync_changes_tbl_seq ON _sync_changes(tbl, seq)`)
   sql.exec(`CREATE TABLE IF NOT EXISTS _sync_meta (k TEXT PRIMARY KEY, v TEXT)`)
+  // Mutation/command dedup (exactly-once under retry). See dedup.ts.
+  sql.exec(`CREATE TABLE IF NOT EXISTS _sync_seen_tx (
+              tx_id  TEXT PRIMARY KEY,
+              ok     INTEGER NOT NULL,
+              cursor TEXT,
+              error  TEXT,
+              result TEXT,
+              ts     INTEGER NOT NULL
+            )`)
 }
 
 /**
@@ -102,4 +111,22 @@ export function readChangesSince(sql: SqlStorage, cursor: number): Array<ChangeR
 /** Every current row of a collection table — the initial-subscribe snapshot. */
 export function snapshotAll(sql: SqlStorage, tbl: string): Array<Record<string, SqlStorageValue>> {
   return Array.from(sql.exec<Record<string, SqlStorageValue>>(`SELECT * FROM ${tbl}`))
+}
+
+/** Current rows for a set of keys, for hydrating deltas. `tbl`/`pk` are
+ *  validated identifiers (the Registry enforces this). */
+export function hydrateRows(
+  sql: SqlStorage,
+  tbl: string,
+  pk: string,
+  keys: Array<string>,
+): Map<string, Record<string, SqlStorageValue>> {
+  const out = new Map<string, Record<string, SqlStorageValue>>()
+  for (const k of keys) {
+    const rows = Array.from(
+      sql.exec<Record<string, SqlStorageValue>>(`SELECT * FROM ${tbl} WHERE ${pk} = ? LIMIT 1`, k),
+    )
+    if (rows.length > 0) out.set(k, rows[0]!)
+  }
+  return out
 }

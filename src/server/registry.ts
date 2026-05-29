@@ -2,6 +2,8 @@
 // client-supplied-key rule (ADR-0001 D9). defineMutation/defineCommand arrive
 // with the sync + confirmation milestones.
 
+import type { SqlStorage } from "@cloudflare/workers-types"
+import type { MutOp, RowOp } from "../wire/frames.ts"
 import { SYNC_PREFIX } from "./changes.ts"
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -15,8 +17,42 @@ export interface CollectionDef {
   ddl: string
 }
 
-export class Registry {
+/** Context for a mutation handler. `execute` runs inside `transactionSync`. */
+export interface MutationCtx<TUser> {
+  user: TUser
+  op: MutOp
+  sql: SqlStorage
+}
+
+export interface MutationDef<TUser> {
+  collection: string
+  type: RowOp
+  /** Runs BEFORE the transaction; may be async (read other rows, call out).
+   *  Throw to deny — the frame is rejected and nothing is applied. */
+  authorize?: (ctx: MutationCtx<TUser>) => void | Promise<void>
+  /** Runs INSIDE `transactionSync` — MUST be synchronous (ADR-0001 D11/C6). */
+  execute: (ctx: MutationCtx<TUser>) => void
+}
+
+/** Context for a command handler. `execute` runs outside any transaction. */
+export interface CommandCtx<TUser> {
+  user: TUser
+  args: unknown
+  sql: SqlStorage
+}
+
+export interface CommandDef<TUser> {
+  name: string
+  authorize?: (ctx: CommandCtx<TUser>) => void | Promise<void>
+  /** Side-effecting command; may be async. Result is returned on `committed`. */
+  execute: (ctx: CommandCtx<TUser>) => unknown | Promise<unknown>
+}
+
+export class Registry<TUser = unknown> {
   readonly collections = new Map<string, CollectionDef>()
+  /** Keyed by `${collection}:${type}`. */
+  readonly mutations = new Map<string, MutationDef<TUser>>()
+  readonly commands = new Map<string, CommandDef<TUser>>()
 
   defineCollection(def: CollectionDef): this {
     assertValidCollection(def)
@@ -24,6 +60,22 @@ export class Registry {
       throw new Error(`collection '${def.table}' is already defined`)
     }
     this.collections.set(def.table, def)
+    return this
+  }
+
+  defineMutation(def: MutationDef<TUser>): this {
+    if (!this.collections.has(def.collection)) {
+      throw new Error(`defineMutation: unknown collection '${def.collection}' — define the collection first`)
+    }
+    const key = `${def.collection}:${def.type}`
+    if (this.mutations.has(key)) throw new Error(`mutation '${key}' is already defined`)
+    this.mutations.set(key, def)
+    return this
+  }
+
+  defineCommand(def: CommandDef<TUser>): this {
+    if (this.commands.has(def.name)) throw new Error(`command '${def.name}' is already defined`)
+    this.commands.set(def.name, def)
     return this
   }
 }

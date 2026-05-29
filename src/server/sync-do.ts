@@ -16,13 +16,23 @@ import { DurableObject } from "cloudflare:workers"
 import type { SqlStorage } from "@cloudflare/workers-types"
 import { createFrameCodec, type FrameCodec } from "../wire/frame-codec.ts"
 import type { ClientFrame, ServerFrame } from "../wire/frames.ts"
-import { currentSeq, initSchema, installTriggers, snapshotAll } from "./changes.ts"
+import {
+  currentSeq,
+  getDrainCursor,
+  hydrateRows,
+  initSchema,
+  installTriggers,
+  readChangesSince,
+  setDrainCursor,
+  snapshotAll,
+} from "./changes.ts"
+import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx } from "./dedup.ts"
 import type { Registry } from "./registry.ts"
 import { SubscriptionRegistry } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
-  /** Subclasses declare their collections (and, from M3, mutations/commands). */
-  protected abstract registry: Registry
+  /** Subclasses declare their collections, mutations, and commands. */
+  protected abstract registry: Registry<TUser>
 
   /** Wire codec. Binary MessagePack by default; override for a JSON transport. */
   protected readonly codec: FrameCodec = createFrameCodec()
@@ -116,24 +126,159 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       case "unsub":
         this.subs.remove(ws, frame.subId)
         return
-      // mut/call land in the next M3 increment (apply + single-stream
-      // confirmation). Reject explicitly so a client gets a clear signal
-      // rather than a silent hang.
       case "mut":
-        this.send(ws, {
-          t: "rejected",
-          txId: frame.txId,
-          error: { code: "UNIMPLEMENTED", message: "mutations land in the next increment" },
-        })
-        return
+        return this.handleMut(ws, frame)
       case "call":
-        this.send(ws, {
-          t: "rejected",
-          txId: frame.txId,
-          error: { code: "UNIMPLEMENTED", message: "commands land in the next increment" },
-        })
-        return
+        return this.handleCall(ws, frame)
     }
+  }
+
+  /**
+   * Apply a mutation atomically and confirm on the single ordered stream.
+   *
+   * Order is the load-bearing invariant (ADR-0002 C1): this connection's
+   * matched deltas are flushed BEFORE its `committed` frame, so the client's
+   * single cursor only ever advances over a contiguous applied prefix and the
+   * optimistic overlay is never dropped before the authoritative row lands.
+   * With no egress coalescer yet (M4), `drainAndBroadcast` sends deltas
+   * synchronously here; M4 must preserve this by flushing the originating
+   * socket before `committed`.
+   */
+  private async handleMut(ws: WebSocket, f: Extract<ClientFrame, { t: "mut" }>): Promise<void> {
+    const seen = lookupTx(this.sql, f.txId)
+    if (seen) return this.replayReceipt(ws, f.txId, seen)
+
+    const user = this.userFor(ws)
+
+    // Authorize every op BEFORE the transaction (may be async).
+    try {
+      for (const op of f.ops) {
+        const def = this.registry.mutations.get(`${f.collection}:${op.type}`)
+        if (!def) throw new Error(`no mutation handler for '${f.collection}:${op.type}'`)
+        if (def.authorize) await def.authorize({ user, op, sql: this.sql })
+      }
+    } catch (e) {
+      return this.rejectTx(ws, f.txId, errorMessage(e))
+    }
+
+    // Apply all ops in one synchronous transaction (atomic with the trigger
+    // rows). A handler that returns a Promise is a programming error.
+    let commitSeq: string
+    try {
+      this.ctx.storage.transactionSync(() => {
+        for (const op of f.ops) {
+          const def = this.registry.mutations.get(`${f.collection}:${op.type}`)!
+          const result = def.execute({ user, op, sql: this.sql }) as unknown
+          if (result !== undefined && typeof (result as PromiseLike<unknown>).then === "function") {
+            throw new Error(`mutation '${f.collection}:${op.type}' execute must be synchronous`)
+          }
+        }
+      })
+      commitSeq = String(currentSeq(this.sql))
+    } catch (e) {
+      return this.rejectTx(ws, f.txId, errorMessage(e))
+    }
+
+    recordTx(this.sql, f.txId, true, commitSeq, null, null)
+    // Deltas first (to this socket and every other subscriber), then receipt.
+    this.drainAndBroadcast()
+    this.send(ws, { t: "committed", txId: f.txId, seq: commitSeq })
+  }
+
+  /** Run a named command (outside any transaction) and confirm with its result. */
+  private async handleCall(ws: WebSocket, f: Extract<ClientFrame, { t: "call" }>): Promise<void> {
+    const seen = lookupTx(this.sql, f.txId)
+    if (seen) return this.replayReceipt(ws, f.txId, seen)
+
+    const def = this.registry.commands.get(f.name)
+    if (!def) return this.rejectTx(ws, f.txId, `unknown command '${f.name}'`, "UNKNOWN_COMMAND")
+
+    const user = this.userFor(ws)
+    let result: unknown
+    try {
+      if (def.authorize) await def.authorize({ user, args: f.args, sql: this.sql })
+      result = await def.execute({ user, args: f.args, sql: this.sql })
+    } catch (e) {
+      return this.rejectTx(ws, f.txId, errorMessage(e))
+    }
+
+    // Serialize the result for dedup replay BEFORE recording success. A
+    // non-serializable result can't be replayed, so record an error rather
+    // than risk re-running the command's side effects on retry.
+    let stored: string | null
+    try {
+      stored = encodeResult(result)
+    } catch (e) {
+      return this.rejectTx(ws, f.txId, `non-serializable command result: ${errorMessage(e)}`, "NON_SERIALIZABLE")
+    }
+
+    const commitSeq = String(currentSeq(this.sql))
+    recordTx(this.sql, f.txId, true, commitSeq, null, stored)
+    this.drainAndBroadcast()
+    this.send(ws, { t: "committed", txId: f.txId, seq: commitSeq, result })
+  }
+
+  private rejectTx(ws: WebSocket, txId: string, message: string, code?: string): void {
+    recordTx(this.sql, txId, false, null, message, null)
+    this.send(ws, { t: "rejected", txId, error: code ? { code, message } : { message } })
+  }
+
+  private replayReceipt(ws: WebSocket, txId: string, seen: SeenTx): void {
+    if (seen.ok) {
+      this.send(ws, { t: "committed", txId, seq: seen.cursor ?? "0", result: decodeResult(seen.result) })
+    } else {
+      this.send(ws, { t: "rejected", txId, error: { message: seen.error ?? "unknown" } })
+    }
+  }
+
+  /**
+   * Drain `_sync_changes` from the last broadcast watermark, fan out one `d`
+   * per changed key to each subscriber of the affected collection, then a
+   * single `uptodate` boundary per touched socket. Multiple changes to a key
+   * within the drain collapse to the latest op.
+   */
+  protected drainAndBroadcast(): void {
+    const sql = this.sql
+    const last = getDrainCursor(sql)
+    const changes = readChangesSince(sql, last)
+    if (changes.length === 0) return
+    const cursor = String(changes[changes.length - 1]!.seq)
+
+    const byTable = new Map<string, Array<(typeof changes)[number]>>()
+    for (const c of changes) {
+      let arr = byTable.get(c.tbl)
+      if (!arr) {
+        arr = []
+        byTable.set(c.tbl, arr)
+      }
+      arr.push(c)
+    }
+
+    const touched = new Set<WebSocket>()
+    for (const [tbl, tableChanges] of byTable) {
+      const coll = this.registry.collections.get(tbl)
+      if (!coll) continue
+      const latest = new Map<string, (typeof tableChanges)[number]>()
+      for (const c of tableChanges) latest.set(c.key, c)
+      const liveKeys = [...latest.values()].filter((c) => c.op !== "delete").map((c) => c.key)
+      const hydrated = hydrateRows(sql, tbl, coll.pk, liveKeys)
+
+      for (const { ws, sub } of this.subs.forCollection(tbl)) {
+        for (const [key, change] of latest) {
+          const row = hydrated.get(key)
+          if (change.op === "delete" || !row) {
+            this.send(ws, { t: "d", sub: sub.subId, key, op: "delete", seq: cursor })
+          } else {
+            // Full row as the partial patch; column-level diffs arrive later.
+            this.send(ws, { t: "d", sub: sub.subId, key, op: change.op, cols: row, seq: cursor })
+          }
+        }
+        touched.add(ws)
+      }
+    }
+
+    for (const ws of touched) this.send(ws, { t: "uptodate", seq: cursor })
+    setDrainCursor(sql, changes[changes.length - 1]!.seq)
   }
 
   /** Full-collection subscribe: emit every current row as a snapshot, then a
@@ -168,4 +313,8 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   protected getLiveWs(): Iterable<WebSocket> {
     return this.liveWs
   }
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
 }
