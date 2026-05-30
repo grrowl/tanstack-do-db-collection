@@ -44,18 +44,21 @@ export type ClientFrame =
   // subscription. Used for cursor load-more (scroll-back); deltas for the
   // window already flow via the live `sub` on the query's `where`.
   //
-  // The cursor double-read is ONE frame so the server reads both halves at a
-  // single `seq` (atomic), and the client applies the whole page in stream
-  // order before any later delta — see ADR-0003. `where` is the next-page
-  // predicate (bounded by `limit`); `ties` is the unbounded boundary-ties
-  // predicate. They can't collapse into one `where`: ties must be unbounded
-  // while next is limited, an asymmetry a single (where, limit) can't express.
+  // The frame is a serialized subset of @tanstack/db's `LoadSubsetOptions`
+  // (ADR-0005): `where` is the base filter and `cursor` is its `CursorExpressions`,
+  // carried RAW (whereFrom/whereCurrent exclude the base `where`, exactly as
+  // TanStack defines them). The server composes `base AND whereCurrent` (ties, unbounded)
+  // and `base AND whereFrom` (next page, bounded by `limit`). The cursor
+  // double-read is ONE frame so the server reads both halves at a single `seq`
+  // (atomic) and the client applies the page in stream order before any later
+  // delta — see ADR-0003. Ties must be unbounded while next is limited, an
+  // asymmetry a single (where, limit) can't express, hence two predicates.
   | {
       t: "fetch"
       fetchId: string
       collection: string
       where?: WireExpression
-      ties?: WireExpression
+      cursor?: { whereFrom: WireExpression; whereCurrent: WireExpression }
       orderBy?: WireOrderBy
       limit?: number
     }

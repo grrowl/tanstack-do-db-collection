@@ -30,7 +30,7 @@ import {
 import { Broadcaster } from "./broadcast.ts"
 import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx, sweepDedup } from "./dedup.ts"
 import type { Registry } from "./registry.ts"
-import { compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
+import { andPredicates, compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
 import { SubscriptionRegistry } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
@@ -153,28 +153,46 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
    *  Used by the client for cursor load-more; the window's live deltas already
    *  flow via the `sub` on the query's `where`.
    *
-   *  The cursor double-read (`ties` boundary-equals, unbounded; `where`
-   *  next-page, bounded by `limit`) runs as TWO SELECTs in ONE handler turn:
-   *  synchronous SQLite, no `await` between them, so both observe the same
-   *  database at one `seq`. The page therefore slots into the delta stream at a
-   *  single position — a concurrent mutation is either reflected in it or
-   *  arrives as a delta AFTER it, never split across the two reads (ADR-0003). */
+   *  The frame mirrors @tanstack/db's `LoadSubsetOptions` (ADR-0005): a base
+   *  `where` plus a raw `cursor` (whereFrom/whereCurrent, which exclude the base). We compose
+   *  `base AND whereCurrent` (ties, unbounded) and `base AND whereFrom` (next
+   *  page, bounded by `limit`) as TWO SELECTs in ONE handler turn: synchronous
+   *  SQLite, no `await` between them, so both observe the same database at one
+   *  `seq`. The page therefore slots into the delta stream at a single position
+   *  — a concurrent mutation is either reflected in it or arrives as a delta
+   *  AFTER it, never split across the two reads (ADR-0003). */
   private handleFetch(ws: WebSocket, frame: Extract<ClientFrame, { t: "fetch" }>): void {
     const coll = this.registry.collections.get(frame.collection)
     if (!coll) {
       this.send(ws, { t: "page", fetchId: frame.fetchId, rows: [], seq: "0" })
       return
     }
+    // A cursor must carry BOTH halves (TanStack's CursorExpressions always
+    // does). A missing `whereCurrent` would otherwise compose to an empty
+    // predicate and run the ties SELECT unbounded — a silent full-table scan,
+    // which the operator floor exists to forbid. Reject loudly instead.
+    if (frame.cursor != null && (frame.cursor.whereCurrent == null || frame.cursor.whereFrom == null)) {
+      console.error(`fetch '${frame.fetchId}' on '${frame.collection}' rejected: malformed cursor`)
+      this.send(ws, { t: "page", fetchId: frame.fetchId, rows: [], seq: String(currentSeq(this.sql)) })
+      return
+    }
     const seq = String(currentSeq(this.sql))
     try {
       const rows: Array<unknown> = []
-      // Ties first (unbounded boundary set), then the bounded next page.
-      if (frame.ties != null) {
-        const tq = compileSubsetQuery(frame.collection, { where: frame.ties, orderBy: frame.orderBy })
+      // Cursor present: ties first (base AND whereCurrent, unbounded boundary
+      // set), then the bounded next page (base AND whereFrom). The cursor
+      // expressions arrive raw — excluding the base — so we compose them here.
+      // No cursor: a plain bounded `where` read.
+      if (frame.cursor != null) {
+        const tq = compileSubsetQuery(frame.collection, {
+          where: andPredicates(frame.where, frame.cursor.whereCurrent),
+          orderBy: frame.orderBy,
+        })
         rows.push(...Array.from(this.sql.exec(tq.sql, ...tq.params)))
       }
+      const nextWhere = frame.cursor != null ? andPredicates(frame.where, frame.cursor.whereFrom) : frame.where
       const nq = compileSubsetQuery(frame.collection, {
-        where: frame.where,
+        where: nextWhere,
         orderBy: frame.orderBy,
         limit: frame.limit,
       })

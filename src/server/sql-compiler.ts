@@ -88,6 +88,17 @@ function compileExpr(node: unknown, params: Array<unknown>): string {
   )
 }
 
+/** Combine two `where` IR predicates with AND, mirroring @tanstack/db's `and()`
+ *  node shape (`{ type: "func", name: "and", args: [a, b] }`) so the existing
+ *  compiler path handles it. Either side may be absent. Used to compose a base
+ *  `where` with a cursor expression server-side (the cursor expressions arrive
+ *  raw, excluding the base, exactly as TanStack's CursorExpressions define). */
+export function andPredicates(a: unknown, b: unknown): unknown {
+  if (a == null) return b
+  if (b == null) return a
+  return { type: "func", name: "and", args: [a, b] }
+}
+
 /** Compile a `where` IR to a SQL boolean expression + bound params. */
 export function compileWhere(where: unknown): { sql: string; params: Array<unknown> } {
   const params: Array<unknown> = []

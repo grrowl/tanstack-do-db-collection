@@ -1,7 +1,10 @@
 # 0003 — Cursor load-more is one atomic fetch, not two
 
 **Status:** Accepted. Extends [ADR-0001](./0001-sync-architecture.md)'s subset
-shaping; a deliberate, reasoned departure from Electric's adapter.
+shaping; a deliberate, reasoned departure from Electric's adapter. The atomic
+single-frame decision stands; the wire field *naming* described here (`ties` /
+`where`) was superseded by [ADR-0005](./0005-fetch-frame-mirrors-loadsubsetoptions.md)
+after 0.1.0.
 
 ## Context
 

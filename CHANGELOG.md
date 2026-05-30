@@ -8,7 +8,24 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **The cursor `fetch` frame now mirrors `@tanstack/db`'s `LoadSubsetOptions`.**
+  Breaking wire change (client and server ship together). The frame carries a
+  base `where` plus a raw `cursor: { whereFrom, whereCurrent }` — TanStack's own
+  `CursorExpressions` names and semantics (the cursor expressions exclude the
+  base `where`) — replacing the previous private `where`/`ties` fields that
+  combined the predicates client-side. The server now composes `base AND
+  whereCurrent` (ties, unbounded) and `base AND whereFrom` (next page, bounded by
+  `limit`). Behaviour is unchanged (identical compiled SQL); the win is
+  traceability to upstream. A malformed cursor (a missing half) is now rejected
+  loudly instead of degrading to an unbounded scan. See
+  [ADR-0005](docs/adr/0005-fetch-frame-mirrors-loadsubsetoptions.md).
+
+### Added
+
+- A real-tie integration test (unbounded boundary ties + limited next page + base
+  predicate composed into both halves) covering the cursor `fetch` against the DO.
 
 ## [0.1.0] — 2026-05-30
 

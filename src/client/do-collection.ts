@@ -15,7 +15,7 @@
 //     loaded subset are confirmed and their optimistic overlay retired by a
 //     post-mutation empty sync commit (ADR-0002 C2, verified).
 
-import { and, compileSingleRowExpression, toBooleanPredicate, type CollectionConfig } from "@tanstack/db"
+import { compileSingleRowExpression, toBooleanPredicate, type CollectionConfig } from "@tanstack/db"
 import type { MutOp, RowOp } from "../wire/frames.ts"
 import { type SubHandler, WebSocketTransport } from "./transport.ts"
 
@@ -150,36 +150,29 @@ export function doCollectionOptions<T extends object>(
 
       // Cursor load-more (scroll-back). The live sub on `where` already streams
       // deltas for the whole subset, so this is a one-shot fetch of the older
-      // rows the window now needs — NOT a new live registration. Mirrors
-      // Electric's double request: `whereCurrent` collects ALL boundary ties
-      // (no limit — a prior page's limit may have split a run of equal order
-      // values), `whereFrom` collects the next `limit` rows strictly after the
-      // cursor. Both exclude the base `where`, so we re-combine with it.
+      // rows the window now needs — NOT a new live registration.
       //
-      // Scroll-back: ONE fetch carrying both halves of the cursor double-read —
-      // `ties` (boundary equals, unbounded) and `where` (next page, bounded by
-      // limit). The server reads both at one seq (atomic), and because it's a
-      // single frame the client applies the whole page in one macrotask, with
-      // the write running before any later delta is processed. That ordering is
-      // what prevents a concurrent delete from being undone by a stale tie
-      // (ADR-0003); the deferred two-frame merge could not guarantee it.
+      // The fetch frame is a serialized `LoadSubsetOptions` (ADR-0005): we forward TanStack's
+      // own `where` and `cursor` (whereFrom/whereCurrent) verbatim. The server
+      // composes `base AND whereCurrent` (ties, unbounded) and `base AND whereFrom`
+      // (next page, bounded by `limit`). It's ONE frame, so the server reads both
+      // halves at one seq (atomic) and the client applies the whole page in one
+      // macrotask — the write lands before any later delta. That ordering is what
+      // prevents a concurrent delete from being undone by a stale tie (ADR-0003).
       //
-      // Rows are still written insert-if-ABSENT: a boundary tie already in the
-      // window must not be re-inserted (a differing value would throw
+      // Rows are written insert-if-ABSENT: a boundary tie already in the window
+      // must not be re-inserted (a differing value would throw
       // DuplicateKeySyncError and abort the transaction), and a key the live sub
       // already holds keeps its fresher value. The live `where` sub stays the
       // source of truth for anything currently in the collection.
       const loadMore = async (o: LoadSubsetOptions): Promise<void> => {
-        const cursor = o.cursor!
-        const base = o.where
-        const tiesWhere = base != null ? and(base as never, cursor.whereCurrent as never) : cursor.whereCurrent
-        const nextWhere = base != null ? and(base as never, cursor.whereFrom as never) : cursor.whereFrom
+        const { whereFrom, whereCurrent } = o.cursor!
         const page = await transport.fetch({
           t: "fetch",
           fetchId: `${table}#fetch#${++subSeq}`,
           collection: table,
-          where: nextWhere,
-          ties: tiesWhere,
+          where: o.where,
+          cursor: { whereFrom, whereCurrent },
           orderBy: o.orderBy,
           limit: o.limit,
         })

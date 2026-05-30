@@ -1,4 +1,4 @@
-import { and, createCollection, createLiveQueryCollection, eq } from "@tanstack/db"
+import { createCollection, createLiveQueryCollection, eq } from "@tanstack/db"
 import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions } from "../src/client/do-collection.ts"
@@ -146,7 +146,7 @@ describe("on-demand loadSubset (M11) — refcounting", () => {
 describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => {
   const cursorOrderBy = [{ expression: { type: "ref", path: ["body"] }, compareOptions: { direction: "desc" } }]
 
-  it("issues ONE atomic fetch carrying both ties and the next-page predicate", async () => {
+  it("issues ONE atomic fetch shaped as a LoadSubsetOptions (base where + raw cursor)", async () => {
     const page = [
       { id: "t1", body: "16" },
       { id: "n1", body: "15" },
@@ -164,12 +164,12 @@ describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => 
     // ONE frame, so the server reads both halves at one seq (atomic).
     expect(fetches.length).toBe(1)
     const f = fetches[0]!
-    // `where` = next page (bounded by limit); `ties` = boundary equals (the
-    // server applies no limit to it). Each combined with the base `where`,
-    // which the cursor expressions deliberately exclude.
+    // The frame mirrors TanStack's LoadSubsetOptions: the base `where` is carried
+    // SEPARATELY from the raw cursor expressions (which, per TanStack, exclude
+    // the base `where`). The server composes base AND each half.
+    expect(f.where).toEqual(base)
+    expect(f.cursor).toEqual({ whereFrom: cursor.whereFrom, whereCurrent: cursor.whereCurrent })
     expect(f.limit).toBe(5)
-    expect(f.where).toEqual(and(base as never, cursor.whereFrom as never))
-    expect(f.ties).toEqual(and(base as never, cursor.whereCurrent as never))
     // The whole page lands in the collection as inserts.
     const writes = calls.filter((c) => c[0] === "write").map((c) => (c[1] as { value: unknown }).value)
     expect(writes).toEqual(page)
@@ -359,6 +359,70 @@ describe("on-demand loadSubset (M11) — against the DO", () => {
       limit: 5,
     })) as Array<Msg>
     expect(rows.map((r) => r.body)).toEqual(["15", "14", "13", "12", "11"])
+    t.close()
+  })
+
+  it("cursor fetch returns ALL boundary ties (unbounded) + the limited next page, base-filtered", async () => {
+    const room = "od-ties"
+    const t = realTransport(room)
+    await t.connect()
+    await runInDurableObject(env.SYNC_DO.get(env.SYNC_DO.idFromName(room)), (_i, s) => {
+      const ins = (id: string, body: string) => s.storage.sql.exec("INSERT INTO messages(id,body) VALUES(?,?)", id, body)
+      // Boundary value "30" is tied across 7 rows; only k* are in the base subset.
+      for (let i = 1; i <= 5; i++) ins(`k30_${i}`, "30") // ties, in base
+      ins("x30_1", "30") // tie, excluded by base
+      ins("x30_2", "30") // tie, excluded by base
+      for (let i = 1; i <= 3; i++) ins(`k20_${i}`, "20") // next page, in base
+      ins("x20_1", "20") // next, excluded by base
+      ins("k40_1", "40") // above the boundary (excluded by the cursor)
+      ins("k40_2", "40")
+    })
+
+    const orderBy = [{ expression: { type: "ref", path: ["body"] }, compareOptions: { direction: "desc" } }]
+    const rows = (await t.fetch({
+      t: "fetch",
+      fetchId: "f-ties",
+      collection: "messages",
+      where: whereFunc("like", "id", "k%"), // base filter, composed with each half server-side
+      cursor: {
+        whereCurrent: whereEq("body", "30"), // boundary ties — server applies NO limit
+        whereFrom: whereFunc("lt", "body", "30"), // next page — server applies the limit
+      },
+      orderBy,
+      limit: 2,
+    })) as Array<Msg>
+
+    // ALL 5 base-matching ties at the boundary come back despite limit:2 (the
+    // unbounded whereCurrent), then exactly 2 of the 3 next-page rows.
+    expect(rows.filter((r) => r.body === "30").length).toBe(5) // not 7 — x* filtered by base
+    expect(rows.filter((r) => r.body === "20").length).toBe(2) // limited, not 3
+    expect(rows.some((r) => r.body === "40")).toBe(false) // above the boundary
+    expect(rows.every((r) => r.id.startsWith("k"))).toBe(true) // base applied to BOTH halves
+    // Ties are emitted before the next page.
+    expect(rows.slice(0, 5).every((r) => r.body === "30")).toBe(true)
+    t.close()
+  })
+
+  it("rejects a malformed cursor (missing a half) instead of scanning the table", async () => {
+    const room = "od-badcursor"
+    const t = realTransport(room)
+    await t.connect()
+    await runInDurableObject(env.SYNC_DO.get(env.SYNC_DO.idFromName(room)), (_i, s) => {
+      for (let i = 1; i <= 10; i++) s.storage.sql.exec("INSERT INTO messages(id,body) VALUES(?,?)", `m${i}`, String(i))
+    })
+
+    // whereCurrent omitted — composing it away would run the ties SELECT
+    // unbounded. The server must reject (empty page), not return all 10 rows.
+    const orderBy = [{ expression: { type: "ref", path: ["body"] }, compareOptions: { direction: "desc" } }]
+    const rows = (await t.fetch({
+      t: "fetch",
+      fetchId: "f-bad",
+      collection: "messages",
+      cursor: { whereFrom: whereFunc("lt", "body", "5") } as never, // missing whereCurrent
+      orderBy,
+      limit: 2,
+    })) as Array<Msg>
+    expect(rows).toEqual([])
     t.close()
   })
 
