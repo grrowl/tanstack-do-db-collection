@@ -17,6 +17,7 @@ import type { SqlStorage, SqlStorageValue } from "@cloudflare/workers-types"
 import { createFrameCodec, type FrameCodec } from "../wire/frame-codec.ts"
 import type { ClientFrame, ServerFrame } from "../wire/frames.ts"
 import {
+  assertSyncCompatible,
   compactChanges,
   currentSeq,
   getDrainCursor,
@@ -34,8 +35,19 @@ import { andPredicates, compileSubsetQuery, UnsupportedPredicateError } from "./
 import { SubscriptionRegistry } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
-  /** Subclasses declare their collections, mutations, and commands. */
-  protected abstract registry: Registry<TUser, Env>
+  /** Set by `registerSync` — the collections/mutations/commands this DO serves. */
+  #registry: Registry<TUser, Env> | undefined
+
+  /** The registered registry. Throws if `registerSync` hasn't run yet (ADR-0007). */
+  protected get registry(): Registry<TUser, Env> {
+    if (!this.#registry) {
+      throw new Error(
+        "sync not registered — call this.registerSync(registry) in your constructor's " +
+          "blockConcurrencyWhile, after creating your tables",
+      )
+    }
+    return this.#registry
+  }
 
   /** Wire codec. Binary MessagePack by default; override for a JSON transport. */
   protected readonly codec: FrameCodec = createFrameCodec()
@@ -51,7 +63,6 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   private writesSinceCompaction = 0
   protected readonly broadcaster: Broadcaster
   private readonly liveWs = new Set<WebSocket>()
-  private schemaReady = false
 
   constructor(ctx: ConstructorParameters<typeof DurableObject>[0], env: Env) {
     super(ctx, env)
@@ -67,15 +78,19 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     return this.ctx.storage.sql
   }
 
-  /** Lazily create framework schema + per-collection table/triggers. Idempotent. */
-  protected initRegistry(): void {
-    if (this.schemaReady) return
+  /**
+   * Wire collections for sync: validate each table is sync-compatible (ADR-0007)
+   * and install its CDC triggers. The author owns table creation; call this
+   * AFTER the tables exist — typically in your constructor's
+   * `blockConcurrencyWhile`, after migrating. Idempotent.
+   */
+  protected registerSync(registry: Registry<TUser, Env>): void {
     initSchema(this.sql)
-    for (const c of this.registry.collections.values()) {
-      this.sql.exec(c.ddl)
+    for (const c of registry.collections.values()) {
+      assertSyncCompatible(this.sql, c.table, c.pk)
       installTriggers(this.sql, c.table, c.pk)
     }
-    this.schemaReady = true
+    this.#registry = registry
   }
 
   /**
@@ -99,8 +114,6 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       if (e instanceof Response) return e
       return new Response("unauthorized", { status: 401 })
     }
-
-    this.initRegistry()
 
     const pair = new WebSocketPair()
     const client = pair[0]
@@ -341,8 +354,8 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
    * dedup — a server write has no client to confirm to. Idempotency is the
    * caller's job via the collection's mandated stable keys (`INSERT OR IGNORE`).
    *
-   * The caller must have run `initRegistry()` (so the tables and CDC triggers
-   * exist); a write to a never-initialised table silently produces no CDC.
+   * `registerSync` (in your constructor) has already created the CDC triggers,
+   * so a write here reaches connected clients with no extra ceremony (ADR-0007).
    *
    * A thenable return is rejected (and rolls back): any async work belongs
    * BEFORE the call, not inside the transaction.

@@ -1,0 +1,79 @@
+import type { SqlStorage } from "@cloudflare/workers-types"
+import { env, runInDurableObject } from "cloudflare:test"
+import { describe, expect, it } from "vitest"
+import { assertSyncCompatible } from "../src/server/changes.ts"
+
+// WHY: D9 (the pk is a sole TEXT, client-supplied key) is load-bearing for
+// optimistic id parity — a server-assigned INTEGER/AUTOINCREMENT key yields
+// optimistic rows that never retire. Since the author now owns table creation
+// (ADR-0007), the rule is enforced against the ACTUAL table at registerSync time
+// via PRAGMA. Each case pins the *reason* a table is rejected, not just that it is.
+
+// A fresh DO per call gives an isolated SQLite database to define a table in.
+function withSql<T>(fn: (sql: SqlStorage) => T): Promise<T> {
+  return runInDurableObject(env.TEST_DO.get(env.TEST_DO.newUniqueId()), (_i, s) => fn(s.storage.sql))
+}
+
+describe("assertSyncCompatible (ADR-0007, D9) — real-table introspection", () => {
+  it("accepts a column-level TEXT PRIMARY KEY", async () => {
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id TEXT PRIMARY KEY, body TEXT)")
+      expect(() => assertSyncCompatible(sql, "t", "id")).not.toThrow()
+    })
+  })
+
+  it("accepts a table-level PRIMARY KEY on a TEXT column", async () => {
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id TEXT, body TEXT, PRIMARY KEY (id))")
+      expect(() => assertSyncCompatible(sql, "t", "id")).not.toThrow()
+    })
+  })
+
+  it("rejects a missing table", async () => {
+    await withSql((sql) => {
+      expect(() => assertSyncCompatible(sql, "nope", "id")).toThrow(/not found/)
+    })
+  })
+
+  it("rejects an INTEGER rowid-alias primary key", async () => {
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/must be TEXT/)
+    })
+  })
+
+  it("rejects AUTOINCREMENT (server-assigned key breaks id parity)", async () => {
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT)")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/must be TEXT/)
+    })
+  })
+
+  it("rejects a non-TEXT pk type", async () => {
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id BLOB PRIMARY KEY)")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/must be TEXT/)
+    })
+  })
+
+  it("rejects a table with no primary key", async () => {
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id TEXT, body TEXT)")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/sole PRIMARY KEY/)
+    })
+  })
+
+  it("rejects a pk-name mismatch (the PK is some other column)", async () => {
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (other TEXT PRIMARY KEY, id TEXT)")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/sole PRIMARY KEY/)
+    })
+  })
+
+  it("rejects a composite primary key", async () => {
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id TEXT, k TEXT, PRIMARY KEY (id, k))")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/sole PRIMARY KEY/)
+    })
+  })
+})

@@ -21,6 +21,7 @@ export default defineWorkersProject({
           durableObjects: {
             TEST_DO: { className: "TestDO", useSQLite: true },
             SYNC_DO: { className: "SyncTestDO", useSQLite: true },
+            UNREG_DO: { className: "UnregisteredDO", useSQLite: true },
           },
         },
       },

@@ -81,32 +81,38 @@ import { Registry, SyncDurableObject } from "tanstack-do-db-collection"
 interface Claims { userId: string }
 
 export class SessionDO extends SyncDurableObject<Env, Claims> {
-  protected registry = new Registry<Claims>()
-    .defineCollection({
-      table: "messages",
-      pk: "id", // must be a client-supplied TEXT key (ULID/UUIDv7)
-      ddl: `CREATE TABLE IF NOT EXISTS messages (
-              id TEXT PRIMARY KEY, author TEXT NOT NULL,
-              content TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    // You own your schema — migrate with anything (raw DDL, Drizzle, …), then
+    // call registerSync to wire CDC. blockConcurrencyWhile runs it before the
+    // first request. See ADR-0007.
+    ctx.blockConcurrencyWhile(async () => {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY, author TEXT NOT NULL,
+        content TEXT NOT NULL, created_at INTEGER NOT NULL)`)
+      this.registerSync(
+        new Registry<Claims>()
+          .defineCollection({ table: "messages", pk: "id" }) // pk must be a client-supplied TEXT key
+          .defineMutation({
+            collection: "messages",
+            type: "insert",
+            // authorize runs BEFORE the tx (async ok); throw to deny.
+            authorize: ({ user, op }) => {
+              if ((op.cols as { author: string }).author !== user.userId) throw new Error("author mismatch")
+            },
+            // execute runs INSIDE transactionSync — synchronous only.
+            execute: ({ op, sql }) => {
+              const c = op.cols as { id: string; author: string; content: string; created_at: number }
+              sql.exec("INSERT INTO messages(id,author,content,created_at) VALUES(?,?,?,?)", c.id, c.author, c.content, c.created_at)
+            },
+            // afterCommit (optional) runs fire-and-forget AFTER the commit + receipt —
+            // the home for external side effects execute can't do (delete an R2 object,
+            // enqueue a job). Receives `env`; isolated and owns its own idempotency. See ADR-0004.
+            // afterCommit: async ({ op, env }) => { await env.BUCKET.delete(op.key as string) },
+          }),
+      )
     })
-    .defineMutation({
-      collection: "messages",
-      type: "insert",
-      // authorize runs BEFORE the tx (async ok); throw to deny.
-      authorize: ({ user, op }) => {
-        if ((op.cols as { author: string }).author !== user.userId) throw new Error("author mismatch")
-      },
-      // execute runs INSIDE transactionSync — synchronous only.
-      execute: ({ op, sql }) => {
-        const c = op.cols as { id: string; author: string; content: string; created_at: number }
-        sql.exec("INSERT INTO messages(id,author,content,created_at) VALUES(?,?,?,?)", c.id, c.author, c.content, c.created_at)
-      },
-      // afterCommit (optional) runs fire-and-forget AFTER the commit + receipt —
-      // the home for external side effects execute can't do (delete an R2 object,
-      // enqueue a job). Receives `env`; isolated (a throw never affects the
-      // committed write) and owns its own idempotency. See ADR-0004.
-      // afterCommit: async ({ op, env }) => { await env.BUCKET.delete(op.key as string) },
-    })
+  }
 
   // Read the Worker-forged claims header into the per-socket attachment.
   protected parseAttachment(req: Request): Claims {
@@ -114,6 +120,10 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
   }
 }
 ```
+
+> Server-side writes outside the client flow — an agent inserting a row, a
+> webhook, a cron job, a bulk seed — go through `this.runSyncedWrite(sql => …)`:
+> it applies your write and broadcasts it to connected clients (ADR-0006).
 
 ### 2. Route the upgrade from your Worker (the trust boundary)
 

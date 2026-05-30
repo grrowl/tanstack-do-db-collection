@@ -24,53 +24,57 @@ interface Claims {
 const UPDATABLE = new Set(["title", "status", "votes", "updated_at"])
 
 export class BoardDO extends SyncDurableObject<Env, Claims> {
-  protected registry = new Registry<Claims>()
-    .defineCollection({
-      table: "tasks",
-      pk: "id",
-      ddl: `CREATE TABLE IF NOT EXISTS tasks (
-              id         TEXT PRIMARY KEY,
-              title      TEXT NOT NULL,
-              status     TEXT NOT NULL,
-              votes      INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            )`,
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    ctx.blockConcurrencyWhile(async () => {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS tasks (
+        id         TEXT PRIMARY KEY,
+        title      TEXT NOT NULL,
+        status     TEXT NOT NULL,
+        votes      INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`)
+      this.registerSync(
+        new Registry<Claims>()
+          .defineCollection({ table: "tasks", pk: "id" })
+          .defineMutation({
+            collection: "tasks",
+            type: "insert",
+            execute: ({ op, sql }) => {
+              const c = op.cols as { id: string; title: string; status: string; votes: number; updated_at: number }
+              sql.exec(
+                "INSERT INTO tasks(id, title, status, votes, updated_at) VALUES (?, ?, ?, ?, ?)",
+                c.id,
+                c.title,
+                c.status,
+                c.votes,
+                c.updated_at,
+              )
+            },
+          })
+          .defineMutation({
+            collection: "tasks",
+            type: "update",
+            // A vote/edit sends a getChanges() diff — any of title/status/votes
+            // plus the bumped updated_at. Build the SET from the present keys.
+            execute: ({ op, sql }) => {
+              const cols = op.cols as Record<string, unknown>
+              const keys = Object.keys(cols).filter((k) => UPDATABLE.has(k))
+              if (keys.length === 0) return
+              const set = keys.map((k) => `"${k}" = ?`).join(", ")
+              sql.exec(`UPDATE tasks SET ${set} WHERE id = ?`, ...keys.map((k) => cols[k]), op.key as string)
+            },
+          })
+          .defineMutation({
+            collection: "tasks",
+            type: "delete",
+            execute: ({ op, sql }) => {
+              sql.exec("DELETE FROM tasks WHERE id = ?", op.key as string)
+            },
+          }),
+      )
     })
-    .defineMutation({
-      collection: "tasks",
-      type: "insert",
-      execute: ({ op, sql }) => {
-        const c = op.cols as { id: string; title: string; status: string; votes: number; updated_at: number }
-        sql.exec(
-          "INSERT INTO tasks(id, title, status, votes, updated_at) VALUES (?, ?, ?, ?, ?)",
-          c.id,
-          c.title,
-          c.status,
-          c.votes,
-          c.updated_at,
-        )
-      },
-    })
-    .defineMutation({
-      collection: "tasks",
-      type: "update",
-      // A vote/edit sends a getChanges() diff — any of title/status/votes plus
-      // the bumped updated_at. Build the SET from the whitelisted keys present.
-      execute: ({ op, sql }) => {
-        const cols = op.cols as Record<string, unknown>
-        const keys = Object.keys(cols).filter((k) => UPDATABLE.has(k))
-        if (keys.length === 0) return
-        const set = keys.map((k) => `"${k}" = ?`).join(", ")
-        sql.exec(`UPDATE tasks SET ${set} WHERE id = ?`, ...keys.map((k) => cols[k]), op.key as string)
-      },
-    })
-    .defineMutation({
-      collection: "tasks",
-      type: "delete",
-      execute: ({ op, sql }) => {
-        sql.exec("DELETE FROM tasks WHERE id = ?", op.key as string)
-      },
-    })
+  }
 
   protected override parseAttachment(req: Request): Claims {
     return { userId: new URL(req.url).searchParams.get("user") ?? "anon" }
@@ -81,7 +85,6 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
     const path = url.pathname
 
     if (path.endsWith("/seed")) {
-      this.initRegistry()
       const n = Math.max(0, Math.min(50_000, Number(url.searchParams.get("n") ?? "5000")))
       // Seed with TIE-BURSTS: every 25 tasks share an `updated_at`, so scrolling
       // back crosses real tie boundaries (exercising the cursor `whereCurrent`).
@@ -109,7 +112,6 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
     }
 
     if (path.endsWith("/bump")) {
-      this.initRegistry()
       const n = Math.max(1, Math.min(100, Number(url.searchParams.get("n") ?? "5")))
       const now = Date.now()
       // Bump random (mostly cold) tasks and broadcast — they move into clients'
@@ -122,7 +124,6 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
     }
 
     if (path.endsWith("/count")) {
-      this.initRegistry()
       const c = Array.from(this.sql.exec("SELECT count(*) AS c FROM tasks"))[0]!.c as number
       return Response.json({ count: c })
     }

@@ -10,6 +10,16 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Changed
 
+- **Author-owned schema; `registerSync` wires the sync.** Breaking. Collection
+  definitions are now `{ table, pk }` — `ddl` is removed. You create your tables
+  yourself (raw DDL, Drizzle, any migrator), then call `this.registerSync(registry)`
+  — typically in your constructor's `blockConcurrencyWhile`, after migrating. It
+  validates each table (one `PRAGMA`: the pk is a sole `TEXT` client key — D9) and
+  installs the CDC triggers. Lazy `initRegistry`-on-`fetch` is gone; schema exists
+  before the first event. Forget the call → `this.registry` throws loud. This also
+  retires `runSyncedWrite`'s "caller ensures init" caveat. See
+  [ADR-0007](docs/adr/0007-author-owned-schema-register-sync.md).
+
 - **The cursor `fetch` frame now mirrors `@tanstack/db`'s `LoadSubsetOptions`.**
   Breaking wire change (client and server ship together). The frame carries a
   base `where` plus a raw `cursor: { whereFrom, whereCurrent }` — TanStack's own
@@ -29,7 +39,7 @@ While pre-1.0, the public API may change between 0.x releases.
   `alarm` job, an admin edit, a bulk seed): apply a raw synchronous SQL closure
   in a transaction, then broadcast the resulting CDC to connected clients.
   Outside the client mutation flow — no `txId`, no receipt, no dedup (idempotency
-  rides the collection's mandated stable keys). The caller ensures `initRegistry`.
+  rides the collection's mandated stable keys).
   See [ADR-0006](docs/adr/0006-server-originated-writes.md).
 - **`examples/board`** — an at-scale stress example: 5,000 tasks on one DO,
   bounded window load, `useLiveInfiniteQuery` cursor scroll-back, and a mutable

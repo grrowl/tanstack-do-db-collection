@@ -20,31 +20,35 @@ const SEED: ReadonlyArray<readonly [string, string, string]> = [
 ]
 
 export class ItemsDO extends SyncDurableObject<Env, Claims> {
-  protected registry = new Registry<Claims>()
-    .defineCollection({
-      table: "items",
-      pk: "id",
-      ddl: `CREATE TABLE IF NOT EXISTS items (
-              id         TEXT PRIMARY KEY,
-              category   TEXT NOT NULL,
-              text       TEXT NOT NULL,
-              created_at INTEGER NOT NULL
-            )`,
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    ctx.blockConcurrencyWhile(async () => {
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS items (
+        id         TEXT PRIMARY KEY,
+        category   TEXT NOT NULL,
+        text       TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`)
+      this.registerSync(
+        new Registry<Claims>()
+          .defineCollection({ table: "items", pk: "id" })
+          .defineMutation({
+            collection: "items",
+            type: "insert",
+            execute: ({ op, sql }) => {
+              const c = op.cols as { id: string; category: string; text: string; created_at: number }
+              sql.exec(
+                "INSERT INTO items(id, category, text, created_at) VALUES (?, ?, ?, ?)",
+                c.id,
+                c.category,
+                c.text,
+                c.created_at,
+              )
+            },
+          }),
+      )
     })
-    .defineMutation({
-      collection: "items",
-      type: "insert",
-      execute: ({ op, sql }) => {
-        const c = op.cols as { id: string; category: string; text: string; created_at: number }
-        sql.exec(
-          "INSERT INTO items(id, category, text, created_at) VALUES (?, ?, ?, ?)",
-          c.id,
-          c.category,
-          c.text,
-          c.created_at,
-        )
-      },
-    })
+  }
 
   protected override parseAttachment(req: Request): Claims {
     return { userId: new URL(req.url).searchParams.get("user") ?? "anon" }
@@ -52,17 +56,14 @@ export class ItemsDO extends SyncDurableObject<Env, Claims> {
 
   override async fetch(req: Request): Promise<Response> {
     if (new URL(req.url).pathname.endsWith("/seed")) {
-      this.initRegistry()
       const now = Date.now()
-      for (const [id, category, text] of SEED) {
-        this.ctx.storage.sql.exec(
-          "INSERT OR IGNORE INTO items(id, category, text, created_at) VALUES (?, ?, ?, ?)",
-          id,
-          category,
-          text,
-          now,
-        )
-      }
+      // runSyncedWrite applies + broadcasts (ADR-0006); tables/triggers already
+      // exist from the constructor (ADR-0007).
+      this.runSyncedWrite((sql) => {
+        for (const [id, category, text] of SEED) {
+          sql.exec("INSERT OR IGNORE INTO items(id, category, text, created_at) VALUES (?, ?, ?, ?)", id, category, text, now)
+        }
+      })
       return new Response("seeded")
     }
     return super.fetch(req)

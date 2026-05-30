@@ -75,6 +75,38 @@ export function installTriggers(sql: SqlStorage, tbl: string, pk: string): void 
   )
 }
 
+/**
+ * Validate that an author-created table is sync-compatible (ADR-0007, D9): the
+ * declared `pk` must be the table's SOLE primary key and typed `TEXT` (a
+ * client-supplied stable key). Rejects a missing table, a composite/wrong pk,
+ * and an `INTEGER PRIMARY KEY` (the rowid alias — server-assigned, which breaks
+ * optimistic id parity). Introspects the real table, so it works however the
+ * author created it. `pragma_table_info` is the table-valued form, so the table
+ * name binds as a parameter.
+ */
+export function assertSyncCompatible(sql: SqlStorage, tbl: string, pk: string): void {
+  const cols = Array.from(
+    sql.exec<{ name: string; type: string; is_pk: number }>(
+      "SELECT name, type, pk AS is_pk FROM pragma_table_info(?)",
+      tbl,
+    ),
+  )
+  if (cols.length === 0) {
+    throw new Error(`collection '${tbl}': table not found — create it (migrate) before registerSync`)
+  }
+  const pks = cols.filter((c) => c.is_pk > 0)
+  if (pks.length !== 1 || pks[0]!.name !== pk) {
+    throw new Error(
+      `collection '${tbl}': '${pk}' must be the sole PRIMARY KEY (D9) — got [${pks.map((c) => c.name).join(", ") || "none"}]`,
+    )
+  }
+  if (pks[0]!.type.toUpperCase() !== "TEXT") {
+    throw new Error(
+      `collection '${tbl}': pk '${pk}' must be TEXT (client-supplied key, no AUTOINCREMENT); got '${pks[0]!.type || "(none)"}'`,
+    )
+  }
+}
+
 /** Highest `seq` in the log — the current cursor / write-confirmation receipt. */
 export function currentSeq(sql: SqlStorage): number {
   const rows = Array.from(

@@ -16,11 +16,10 @@ interface Msg {
   body: string
 }
 
-// runSyncedWrite / initRegistry are protected (subclass-facing); reach them in
-// the test via the in-DO instance.
+// runSyncedWrite is protected (subclass-facing); reach it in the test via the
+// in-DO instance. registerSync already ran in the DO constructor (ADR-0007).
 type ServerApi = {
   runSyncedWrite: <T>(fn: (sql: SqlStorage) => T) => T
-  initRegistry: () => void
 }
 const api = (i: unknown): ServerApi => i as unknown as ServerApi
 
@@ -50,7 +49,7 @@ describe("runSyncedWrite (ADR-0006) — server-originated writes", () => {
     const room = "rsw-live"
     const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
     const t = realTransport(room)
-    await t.connect() // the upgrade runs initRegistry
+    await t.connect() // constructing the DO already ran registerSync (ADR-0007)
     const messages = createCollection(doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id }))
     await messages.preload()
     expect(messages.size).toBe(0)
@@ -68,9 +67,8 @@ describe("runSyncedWrite (ADR-0006) — server-originated writes", () => {
   it("a write to an idle DO (no subscribers) reaches a later client via snapshot", async () => {
     const room = "rsw-idle"
     const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
-    // No client connected. Per ADR-0006 the caller ensures init, then writes.
+    // No client connected. The DO registered at construction (ADR-0007); the agent writes.
     await runInDurableObject(stub, (instance) => {
-      api(instance).initRegistry()
       api(instance).runSyncedWrite((sql) => sql.exec("INSERT INTO messages(id,body) VALUES(?,?)", "agent2", "queued"))
     })
 
@@ -87,7 +85,6 @@ describe("runSyncedWrite (ADR-0006) — server-originated writes", () => {
     const room = "rsw-ret"
     const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
     const n = await runInDurableObject(stub, (instance) => {
-      api(instance).initRegistry()
       return api(instance).runSyncedWrite((sql) => {
         sql.exec("INSERT INTO messages(id,body) VALUES('r1','a'),('r2','b')")
         return Array.from(sql.exec("SELECT count(*) AS c FROM messages"))[0]!.c as number
@@ -101,7 +98,6 @@ describe("runSyncedWrite (ADR-0006) — server-originated writes", () => {
     const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
     await expect(
       runInDurableObject(stub, (instance) => {
-        api(instance).initRegistry()
         api(instance).runSyncedWrite((sql) => {
           sql.exec("INSERT INTO messages(id,body) VALUES('x','x')")
           return Promise.resolve() // illegal — must be synchronous
@@ -110,7 +106,6 @@ describe("runSyncedWrite (ADR-0006) — server-originated writes", () => {
     ).rejects.toThrow(/synchronous/)
     // The insert rolled back with the transaction.
     const count = await runInDurableObject(stub, (instance, s) => {
-      api(instance).initRegistry()
       return Array.from(s.storage.sql.exec("SELECT count(*) AS c FROM messages"))[0]!.c as number
     })
     expect(count).toBe(0)
