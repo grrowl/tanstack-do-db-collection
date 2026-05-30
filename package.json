@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "author": "Tom McKenzie",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/grrowl/tanstack-do-db-collection.git"
+  },
+  "homepage": "https://github.com/grrowl/tanstack-do-db-collection#readme",
+  "bugs": {
+    "url": "https://github.com/grrowl/tanstack-do-db-collection/issues"
+  },
   "keywords": [
     "tanstack-db",
     "cloudflare",
