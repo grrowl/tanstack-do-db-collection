@@ -88,10 +88,14 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
       // Seeds use a year-2001 base so any later /bump (Date.now()) sorts above
       // them — a bumped task visibly rockets to the top.
       const base = 1_000_000_000_000
-      this.ctx.storage.transactionSync(() => {
+      // runSyncedWrite (ADR-0006) applies the inserts atomically and broadcasts
+      // the CDC. Seeding happens before any client connects (see boot()), so
+      // there are no subscribers yet — the bounded initial snapshot covers the
+      // seeded rows via SELECT, and the drain cursor advances past them.
+      this.runSyncedWrite((sql) => {
         for (let i = 0; i < n; i++) {
           const updated_at = base + Math.floor(i / 25) * 1000
-          this.sql.exec(
+          sql.exec(
             "INSERT OR IGNORE INTO tasks(id, title, status, votes, updated_at) VALUES (?, ?, ?, ?, ?)",
             `t${String(i).padStart(5, "0")}`,
             `Task #${i}`,
@@ -101,11 +105,6 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
           )
         }
       })
-      // Advance the drain cursor PAST the seed so these inserts aren't later
-      // re-broadcast as deltas. Seeding happens before any client connects (see
-      // boot()), so there are no subscribers — this just consumes the backlog;
-      // the bounded initial snapshot already covers the seeded rows via SELECT.
-      this.drainAndBroadcast()
       return new Response(`seeded ${n}`)
     }
 
@@ -113,15 +112,12 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
       this.initRegistry()
       const n = Math.max(1, Math.min(100, Number(url.searchParams.get("n") ?? "5")))
       const now = Date.now()
-      this.ctx.storage.transactionSync(() => {
-        const ids = Array.from(this.sql.exec("SELECT id FROM tasks ORDER BY RANDOM() LIMIT ?", n)).map(
-          (r) => r.id as string,
-        )
-        for (const id of ids) this.sql.exec("UPDATE tasks SET votes = votes + 1, updated_at = ? WHERE id = ?", now, id)
+      // Bump random (mostly cold) tasks and broadcast — they move into clients'
+      // windows (move-in). runSyncedWrite (ADR-0006) applies + broadcasts.
+      this.runSyncedWrite((sql) => {
+        const ids = Array.from(sql.exec("SELECT id FROM tasks ORDER BY RANDOM() LIMIT ?", n)).map((r) => r.id as string)
+        for (const id of ids) sql.exec("UPDATE tasks SET votes = votes + 1, updated_at = ? WHERE id = ?", now, id)
       })
-      // Raw SQL writes fired the CDC triggers but not the broadcast path — flush
-      // the buffered deltas to every subscriber so move-in is observed live.
-      this.drainAndBroadcast()
       return new Response("bumped")
     }
 

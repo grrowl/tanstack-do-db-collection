@@ -330,6 +330,36 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   }
 
   /**
+   * Apply a SERVER-ORIGINATED write and broadcast it to connected clients
+   * (ADR-0006). The home for writes outside the client mutation flow — an agent
+   * inserting a row, a webhook, a cron/`alarm` job, an admin edit, a bulk seed.
+   *
+   * `fn` runs inside `transactionSync` (atomic, and the same synchronous
+   * constraint mutations live under) and may return a value (e.g. an inserted
+   * count); its CDC is then drained and broadcast on the next coalescer tick.
+   * Unlike a mutation there is no `txId`, no `committed` receipt, and no
+   * dedup — a server write has no client to confirm to. Idempotency is the
+   * caller's job via the collection's mandated stable keys (`INSERT OR IGNORE`).
+   *
+   * The caller must have run `initRegistry()` (so the tables and CDC triggers
+   * exist); a write to a never-initialised table silently produces no CDC.
+   *
+   * A thenable return is rejected (and rolls back): any async work belongs
+   * BEFORE the call, not inside the transaction.
+   */
+  protected runSyncedWrite<T>(fn: (sql: SqlStorage) => T): T {
+    let result: T
+    this.ctx.storage.transactionSync(() => {
+      result = fn(this.sql)
+      if (result != null && typeof (result as unknown as PromiseLike<unknown>).then === "function") {
+        throw new Error("runSyncedWrite fn must be synchronous (it returned a thenable)")
+      }
+    })
+    this.drainAndBroadcast()
+    return result!
+  }
+
+  /**
    * Drain `_sync_changes` from the last broadcast watermark, fan out one `d`
    * per changed key to each subscriber of the affected collection, then a
    * single `uptodate` boundary per touched socket. Multiple changes to a key

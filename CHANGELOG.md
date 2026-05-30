@@ -24,6 +24,13 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Added
 
+- **`runSyncedWrite(fn)`** — a `protected` `SyncDurableObject` primitive for
+  **server-originated writes** (an agent inserting a row, a webhook, a cron/
+  `alarm` job, an admin edit, a bulk seed): apply a raw synchronous SQL closure
+  in a transaction, then broadcast the resulting CDC to connected clients.
+  Outside the client mutation flow — no `txId`, no receipt, no dedup (idempotency
+  rides the collection's mandated stable keys). The caller ensures `initRegistry`.
+  See [ADR-0006](docs/adr/0006-server-originated-writes.md).
 - **`examples/board`** — an at-scale stress example: 5,000 tasks on one DO,
   bounded window load, `useLiveInfiniteQuery` cursor scroll-back, and a mutable
   order key (`updated_at`) so voting/starring bumps a task to the top (move-in
