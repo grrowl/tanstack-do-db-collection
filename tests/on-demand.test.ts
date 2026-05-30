@@ -26,12 +26,14 @@ const whereFunc = (name: string, field: string, value: unknown): unknown => ({
 })
 const whereEq = (field: string, value: unknown): unknown => whereFunc("eq", field, value)
 
-const spyControls = () => {
+// `present` models rows already in the collection (synced or from a prior
+// snapshot), so insert-if-absent in loadMore can be exercised.
+const spyControls = (present: Set<string> = new Set()) => {
   const calls: Array<[string, ...Array<unknown>]> = []
   return {
     calls,
     controls: {
-      collection: {},
+      collection: { get: (key: string) => (present.has(key) ? { id: key } : undefined) },
       begin: () => calls.push(["begin"]),
       write: (m: unknown) => calls.push(["write", m]),
       commit: () => calls.push(["commit"]),
@@ -80,8 +82,8 @@ type OnDemand = {
   loadSubset: (o: LoadOpts) => true | Promise<void>
   unloadSubset: (o: LoadOpts) => void
 }
-const startOnDemand = (transport: WebSocketTransport) => {
-  const { calls, controls } = spyControls()
+const startOnDemand = (transport: WebSocketTransport, present?: Set<string>) => {
+  const { calls, controls } = spyControls(present)
   const adapter = doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id, syncMode: "on-demand" })
   const res = (adapter as unknown as { sync: { sync: (p: unknown) => OnDemand } }).sync.sync(controls)
   return { calls, res }
@@ -119,6 +121,28 @@ describe("on-demand loadSubset (M11) — refcounting", () => {
     expect(subs.map((s) => s.where)).toEqual([whereEq("body", "x"), whereEq("body", "y")])
     expect(subs.length).toBe(2)
   })
+
+  it("resolves loadSubset on a rejected sub (reset, no snap-end) instead of hanging", async () => {
+    // An unsupported predicate / unknown collection makes the server send
+    // `reset` with NO `snap-end`. The load promise must still settle, or the
+    // live query's preload() hangs forever.
+    const rejectingTransport = {
+      connect: async () => {},
+      subscribe: async (_subId: string, _table: string, handler: SubHandler) => {
+        handler.onReset() // rejection terminal — no snapshot follows
+      },
+      unsubscribe: () => {},
+      sendMut: async () => ({}),
+      close: () => {},
+    } as unknown as WebSocketTransport
+    const { res } = startOnDemand(rejectingTransport)
+
+    // Resolves (does not hang); a 50ms race guards against regression.
+    await Promise.race([
+      res.loadSubset({ where: whereEq("body", "x") }),
+      new Promise((_r, reject) => setTimeout(() => reject(new Error("loadSubset hung on reset")), 50)),
+    ])
+  })
 })
 
 describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => {
@@ -152,6 +176,24 @@ describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => 
     // Both pages land in the collection as inserts: ties first, then next page.
     const writes = calls.filter((c) => c[0] === "write").map((c) => (c[1] as { value: unknown }).value)
     expect(writes).toEqual([...tiesRows, ...nextRows])
+  })
+
+  it("writes page rows insert-if-absent: a tie already in the collection is skipped", async () => {
+    // The boundary tie "t1" is already present (it was in the initial window).
+    // Re-inserting it as a sync `insert` with a stale value would throw
+    // DuplicateKeySyncError and abort the open transaction — so it must be
+    // skipped, leaving the live sub's value intact.
+    const tiesRows = [{ id: "t1", body: "16" }]
+    const nextRows = [{ id: "n1", body: "15" }]
+    const { transport } = fakeTransport({ ties: tiesRows, next: nextRows })
+    const { calls, res } = startOnDemand(transport, new Set(["t1"]))
+
+    const base = whereEq("room", "r1")
+    const cursor = { whereFrom: whereFunc("lt", "body", "16"), whereCurrent: whereEq("body", "16") }
+    await res.loadSubset({ where: base, orderBy: cursorOrderBy, limit: 5, cursor })
+
+    const writes = calls.filter((c) => c[0] === "write").map((c) => (c[1] as { value: { id: string } }).value)
+    expect(writes.map((v) => v.id)).toEqual(["n1"]) // t1 (present) skipped, n1 written
   })
 
   it("takes no live refcount, so a sibling query's sub survives its unload", async () => {

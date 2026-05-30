@@ -24,6 +24,16 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Fixed
 
+- **Cursor load-more no longer throws on overlapping boundary rows.** Page rows
+  are written insert-if-absent, so a boundary tie already in the window (or a row
+  a concurrent live delta already refreshed) is skipped rather than re-inserted —
+  which would otherwise throw `DuplicateKeySyncError` and abort the open sync
+  transaction. The live `where` subscription stays the source of truth for rows
+  currently in the collection.
+- **Rejected subscriptions no longer hang `preload()`.** A `reset` with no
+  `snap-end` (the server's response to an unsupported predicate or unknown
+  collection) now resolves the subset's load promise instead of leaving the live
+  query waiting indefinitely.
 - **On-demand `orderBy` IR shape.** `orderBy` clauses from real live queries
   (`{ expression, compareOptions }`) were not recognised by the SQL compiler, so
   server-side ordering was silently dropped and the wrong rows were returned for

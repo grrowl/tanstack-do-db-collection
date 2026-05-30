@@ -54,6 +54,7 @@ interface PendingMutationLike {
 }
 
 interface SyncParams {
+  collection: { get: (key: string) => unknown }
   begin: (options?: { immediate?: boolean }) => void
   write: (message: { type: RowOp; value?: unknown; key?: string }) => void
   commit: () => void
@@ -90,7 +91,7 @@ export function doCollectionOptions<T extends object>(
   let emptyCommit: (() => void) | null = null
 
   const sync = (params: SyncParams): SyncConfigResult => {
-    const { begin, write, commit, markReady, truncate } = params
+    const { collection, begin, write, commit, markReady, truncate } = params
     let open = false
     const ensureBegin = (): void => {
       if (!open) {
@@ -130,6 +131,13 @@ export function doCollectionOptions<T extends object>(
         begin()
         truncate()
         commit()
+        // A reset is also the only terminal signal for a REJECTED sub (the
+        // server sends `reset` with no `snap-end` for an unsupported predicate
+        // or unknown collection). Mark ready here too, or this subset's load
+        // promise — and the live query's preload() — would hang forever. For a
+        // compaction/rotation reset (a valid sub that re-snapshots) this is an
+        // idempotent no-op: onSnapEnd's onReady() has already fired.
+        onReady()
       },
     })
 
@@ -148,11 +156,17 @@ export function doCollectionOptions<T extends object>(
       // values), `whereFrom` collects the next `limit` rows strictly after the
       // cursor. Both exclude the base `where`, so we re-combine with it.
       //
-      // Note: the page is a point-in-time snapshot at the server's fetch seq.
-      // A concurrent delta on one of these (older) rows, arriving via the live
-      // sub between the server's SELECT and our write, could be clobbered by the
-      // stale page row. These are historical rows (rarely mutated mid-scroll);
-      // the next delta for that row re-corrects it. Accepted for v1.
+      // The page is a point-in-time snapshot at the server's fetch seq. Two
+      // hazards, both handled by writing each row insert-if-ABSENT:
+      //   1. A boundary tie (whereCurrent) is often already in the collection
+      //      from the initial bounded window — re-inserting an existing synced
+      //      key whose value differs throws DuplicateKeySyncError (sync.js), and
+      //      the throw aborts the open transaction.
+      //   2. A concurrent live delta may have updated one of these (older) rows
+      //      between the server's SELECT and our write; the page row would be
+      //      stale. Skipping present keys keeps the fresher live value.
+      // Both pages are historical/older rows; the live `where` sub remains the
+      // source of truth for anything currently in the collection.
       const loadMore = async (o: LoadSubsetOptions): Promise<void> => {
         const cursor = o.cursor!
         const base = o.where
@@ -164,8 +178,9 @@ export function doCollectionOptions<T extends object>(
           transport.fetch({ t: "fetch", fetchId: `${fid}-next`, collection: table, where: nextWhere, orderBy: o.orderBy, limit: o.limit }),
         ])
         ensureBegin()
-        for (const r of ties) write({ type: "insert", value: r })
-        for (const r of next) write({ type: "insert", value: r })
+        for (const r of [...ties, ...next]) {
+          if (collection.get(getKey(r as T)) === undefined) write({ type: "insert", value: r })
+        }
         flush()
       }
 
