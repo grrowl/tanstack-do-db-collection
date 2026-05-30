@@ -1,0 +1,11 @@
+{
+  "name": "tanstack-do-db-board",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-03-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "BOARD_DO", "class_name": "BoardDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BoardDO"] }],
+  "assets": { "directory": "./public", "binding": "ASSETS" }
+}

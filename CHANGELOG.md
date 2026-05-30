@@ -24,8 +24,15 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Added
 
+- **`examples/board`** — an at-scale stress example: 5,000 tasks on one DO,
+  bounded window load, `useLiveInfiniteQuery` cursor scroll-back, and a mutable
+  order key (`updated_at`) so voting/starring bumps a task to the top (move-in
+  via the always-emit upsert). A server-side firehose makes the deferred
+  bounded-window-under-churn limitation visible: `loaded` climbs past `window`.
 - A real-tie integration test (unbounded boundary ties + limited next page + base
   predicate composed into both halves) covering the cursor `fetch` against the DO.
+- A move-in integration test: a cold row bumped server-side arrives via the
+  no-`where` live sub and upserts into the collection (ADR-0002 C4).
 
 ## [0.1.0] — 2026-05-30
 

@@ -426,6 +426,42 @@ describe("on-demand loadSubset (M11) — against the DO", () => {
     t.close()
   })
 
+  it("a cold row bumped server-side moves into the collection (no-where live delta upserts)", async () => {
+    // The board pattern: an on-demand window with no `where`, so the live sub
+    // matches ALL rows. A row outside the loaded window that another client
+    // bumps arrives as an `update` delta for an absent key and UPSERTS (move-in,
+    // ADR-0002 C4) — the IVM then windows it. Pins that delivery path.
+    const room = "od-movein"
+    const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
+    const t = realTransport(room)
+    await t.connect()
+    await runInDurableObject(stub, (_i, s) => {
+      for (let i = 0; i <= 5; i++) s.storage.sql.exec("INSERT INTO messages(id,body) VALUES(?,?)", `m${i}`, String(i).padStart(2, "0"))
+    })
+
+    const messages = createCollection(
+      doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
+    )
+    await messages.preload()
+    // Bounded window — top 3 by body desc (m5, m4, m3). m0 is cold.
+    const top3 = createLiveQueryCollection((q) => q.from({ m: messages }).orderBy(({ m }) => m.body, "desc").limit(3))
+    await top3.preload()
+    await waitFor(() => top3.size === 3)
+    expect(messages.get("m0")).toBeUndefined()
+
+    // Another writer bumps the cold m0 to the top (raw write + broadcast — the
+    // firehose path). The no-where live sub delivers the update delta.
+    await runInDurableObject(stub, (instance, s) => {
+      s.storage.sql.exec("UPDATE messages SET body = ? WHERE id = ?", "99", "m0")
+      ;(instance as unknown as { drainAndBroadcast(): void }).drainAndBroadcast()
+    })
+
+    await waitFor(() => messages.get("m0") !== undefined)
+    expect(messages.get("m0")).toMatchObject({ id: "m0", body: "99" })
+    await waitFor(() => top3.get("m0") !== undefined) // IVM windowed it to the top
+    t.close()
+  })
+
   it("a write outside every loaded subset is confirmed without stranding a phantom", async () => {
     const room = "od-outside"
     const t = realTransport(room)
