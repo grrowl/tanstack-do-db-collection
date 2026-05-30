@@ -13,4 +13,5 @@ explains the displacement.
 | [0003](./0003-atomic-cursor-fetch.md) | Cursor load-more is one atomic fetch, not two | Accepted (naming amended by 0005) |
 | [0004](./0004-after-commit-hook.md) | Side effects go in a fire-and-forget `afterCommit`, not the transaction | Accepted |
 | [0005](./0005-fetch-frame-mirrors-loadsubsetoptions.md) | The cursor `fetch` frame mirrors TanStack's `LoadSubsetOptions` | Accepted |
-| [0006](./0006-server-originated-writes.md) | Server-originated writes: `runSyncedWrite` | Accepted |
+| [0006](./0006-server-originated-writes.md) | Server-originated writes: `runSyncedWrite` | Accepted (init caveat retired by 0007) |
+| [0007](./0007-author-owned-schema-register-sync.md) | Author-owned schema; `registerSync` wires the sync | Accepted |

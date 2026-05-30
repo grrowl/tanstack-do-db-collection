@@ -1,7 +1,9 @@
 # 0006 — Server-originated writes: `runSyncedWrite`
 
 **Status:** Accepted. Extends [ADR-0001](./0001-sync-architecture.md)'s write/sync
-model with a third write origin.
+model with a third write origin. The "caller ensures init" caveat below is
+retired by [ADR-0007](./0007-author-owned-schema-register-sync.md) (schema +
+triggers now exist at construction via `registerSync`).
 
 ## Context
 
