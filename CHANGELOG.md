@@ -8,6 +8,10 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.1.0] — 2026-05-30
+
 ### Added
 
 - **`afterCommit` post-commit hook + `env` in handler context.** Mutations gain
