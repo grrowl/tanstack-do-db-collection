@@ -141,6 +141,34 @@ describe("on-demand loadSubset (M11) — against the DO", () => {
     t.close()
   })
 
+  it("loads only the bounded window (orderBy + limit), not the whole subset", async () => {
+    const room = "od-window"
+    const t = realTransport(room)
+    await t.connect()
+    await runInDurableObject(env.SYNC_DO.get(env.SYNC_DO.idFromName(room)), (_i, s) => {
+      for (let i = 1; i <= 20; i++) {
+        s.storage.sql.exec("INSERT INTO messages(id,body) VALUES(?,?)", `m${i}`, String(i).padStart(2, "0"))
+      }
+    })
+
+    const messages = createCollection(
+      doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
+    )
+    await messages.preload()
+
+    // Top-5 by body desc — the live query's limit must bound the load.
+    const top5 = createLiveQueryCollection((q) =>
+      q.from({ m: messages }).orderBy(({ m }) => m.body, "desc").limit(5),
+    )
+    await top5.preload()
+    await waitFor(() => top5.size === 5)
+
+    expect(top5.toArray.map((m) => m.body)).toEqual(["20", "19", "18", "17", "16"])
+    // The collection loaded ONLY the bounded window, not all 20.
+    expect(messages.size).toBe(5)
+    t.close()
+  })
+
   it("a write outside every loaded subset is confirmed without stranding a phantom", async () => {
     const room = "od-outside"
     const t = realTransport(room)

@@ -94,20 +94,31 @@ export function compileWhere(where: unknown): { sql: string; params: Array<unkno
   return { sql: compileExpr(where, params), params }
 }
 
-interface OrderByItem {
-  col: string
-  dir?: "asc" | "desc"
+/** Extract (column, descending) from an orderBy clause. Accepts @tanstack/db's
+ *  OrderByClause ({ expression: PropRef, compareOptions: { direction } }) — the
+ *  real wire shape from a live query — or a simple { col, dir }. */
+function orderByTerm(item: unknown): { col: string; desc: boolean } {
+  const o = item as {
+    expression?: { type?: string; path?: Array<string> }
+    compareOptions?: { direction?: string }
+    col?: unknown
+    dir?: unknown
+  }
+  if (o.expression?.type === "ref" && Array.isArray(o.expression.path) && o.expression.path.length > 0) {
+    const path = o.expression.path
+    return { col: path[path.length - 1]!, desc: o.compareOptions?.direction === "desc" }
+  }
+  if (typeof o.col === "string") return { col: o.col, desc: o.dir === "desc" }
+  throw new UnsupportedPredicateError(`unsupported orderBy clause: ${JSON.stringify(item)}`)
 }
 
 function compileOrderBy(orderBy: unknown): string {
   if (!Array.isArray(orderBy) || orderBy.length === 0) return ""
   return orderBy
     .map((item) => {
-      const o = item as OrderByItem
-      if (!o || !IDENT.test(o.col)) {
-        throw new UnsupportedPredicateError(`invalid orderBy column: ${String((o as { col?: unknown })?.col)}`)
-      }
-      return `"${o.col}" ${o.dir === "desc" ? "DESC" : "ASC"}`
+      const { col, desc } = orderByTerm(item)
+      if (!IDENT.test(col)) throw new UnsupportedPredicateError(`invalid orderBy column: ${col}`)
+      return `"${col}" ${desc ? "DESC" : "ASC"}`
     })
     .join(", ")
 }

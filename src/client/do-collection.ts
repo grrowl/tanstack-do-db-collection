@@ -152,7 +152,10 @@ export function doCollectionOptions<T extends object>(
         })
         const subId = `${table}#${key}`
         loaded.set(key, { subId, refs: 1, ready })
-        void transport.subscribe(subId, table, makeHandler(resolve), o.where)
+        // Forward orderBy/limit so the INITIAL snapshot is the bounded window
+        // (recent N), not the whole where-subset. The live sub's predicate is
+        // still `where`, so entering rows (e.g. new messages) are delivered.
+        void transport.subscribe(subId, table, makeHandler(resolve), o.where, o.orderBy, o.limit)
         return ready
       }
 

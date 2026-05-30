@@ -78,7 +78,10 @@ export class WebSocketTransport {
   private readonly timeoutMs: number
   private readonly open: () => WebSocketLike | Promise<WebSocketLike>
 
-  private readonly handlers = new Map<string, { handler: SubHandler; collection: string; where?: unknown }>()
+  private readonly handlers = new Map<
+    string,
+    { handler: SubHandler; collection: string; where?: unknown; orderBy?: unknown; limit?: number }
+  >()
   private appliedSeq = 0n
   private readonly seqWaiters: Array<SeqWaiter> = []
   private readonly pendingTx = new Map<string, TxWaiter>()
@@ -149,7 +152,15 @@ export class WebSocketTransport {
   private resubscribeAll(): void {
     const since = this.appliedCursor
     for (const [subId, entry] of this.handlers) {
-      this.sendFrame({ t: "sub", subId, collection: entry.collection, where: entry.where, since })
+      this.sendFrame({
+        t: "sub",
+        subId,
+        collection: entry.collection,
+        where: entry.where,
+        orderBy: entry.orderBy,
+        limit: entry.limit,
+        since,
+      })
     }
   }
 
@@ -173,10 +184,17 @@ export class WebSocketTransport {
     this.connectPromise = null
   }
 
-  async subscribe(subId: string, collection: string, handler: SubHandler, where?: unknown): Promise<void> {
-    this.handlers.set(subId, { handler, collection, where })
+  async subscribe(
+    subId: string,
+    collection: string,
+    handler: SubHandler,
+    where?: unknown,
+    orderBy?: unknown,
+    limit?: number,
+  ): Promise<void> {
+    this.handlers.set(subId, { handler, collection, where, orderBy, limit })
     await this.connect()
-    this.sendFrame({ t: "sub", subId, collection, where })
+    this.sendFrame({ t: "sub", subId, collection, where, orderBy, limit })
   }
 
   unsubscribe(subId: string): void {
