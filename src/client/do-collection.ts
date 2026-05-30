@@ -156,29 +156,35 @@ export function doCollectionOptions<T extends object>(
       // values), `whereFrom` collects the next `limit` rows strictly after the
       // cursor. Both exclude the base `where`, so we re-combine with it.
       //
-      // The page is a point-in-time snapshot at the server's fetch seq. Two
-      // hazards, both handled by writing each row insert-if-ABSENT:
-      //   1. A boundary tie (whereCurrent) is often already in the collection
-      //      from the initial bounded window — re-inserting an existing synced
-      //      key whose value differs throws DuplicateKeySyncError (sync.js), and
-      //      the throw aborts the open transaction.
-      //   2. A concurrent live delta may have updated one of these (older) rows
-      //      between the server's SELECT and our write; the page row would be
-      //      stale. Skipping present keys keeps the fresher live value.
-      // Both pages are historical/older rows; the live `where` sub remains the
+      // Scroll-back: ONE fetch carrying both halves of the cursor double-read —
+      // `ties` (boundary equals, unbounded) and `where` (next page, bounded by
+      // limit). The server reads both at one seq (atomic), and because it's a
+      // single frame the client applies the whole page in one macrotask, with
+      // the write running before any later delta is processed. That ordering is
+      // what prevents a concurrent delete from being undone by a stale tie
+      // (ADR-0003); the deferred two-frame merge could not guarantee it.
+      //
+      // Rows are still written insert-if-ABSENT: a boundary tie already in the
+      // window must not be re-inserted (a differing value would throw
+      // DuplicateKeySyncError and abort the transaction), and a key the live sub
+      // already holds keeps its fresher value. The live `where` sub stays the
       // source of truth for anything currently in the collection.
       const loadMore = async (o: LoadSubsetOptions): Promise<void> => {
         const cursor = o.cursor!
         const base = o.where
         const tiesWhere = base != null ? and(base as never, cursor.whereCurrent as never) : cursor.whereCurrent
         const nextWhere = base != null ? and(base as never, cursor.whereFrom as never) : cursor.whereFrom
-        const fid = `${table}#fetch#${++subSeq}`
-        const [ties, next] = await Promise.all([
-          transport.fetch({ t: "fetch", fetchId: `${fid}-ties`, collection: table, where: tiesWhere, orderBy: o.orderBy }),
-          transport.fetch({ t: "fetch", fetchId: `${fid}-next`, collection: table, where: nextWhere, orderBy: o.orderBy, limit: o.limit }),
-        ])
+        const page = await transport.fetch({
+          t: "fetch",
+          fetchId: `${table}#fetch#${++subSeq}`,
+          collection: table,
+          where: nextWhere,
+          ties: tiesWhere,
+          orderBy: o.orderBy,
+          limit: o.limit,
+        })
         ensureBegin()
-        for (const r of [...ties, ...next]) {
+        for (const r of page) {
           if (collection.get(getKey(r as T)) === undefined) write({ type: "insert", value: r })
         }
         flush()

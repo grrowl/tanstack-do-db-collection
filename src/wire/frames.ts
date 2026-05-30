@@ -43,11 +43,19 @@ export type ClientFrame =
   // One-shot paginated page fetch — a subset snapshot with NO live
   // subscription. Used for cursor load-more (scroll-back); deltas for the
   // window already flow via the live `sub` on the query's `where`.
+  //
+  // The cursor double-read is ONE frame so the server reads both halves at a
+  // single `seq` (atomic), and the client applies the whole page in stream
+  // order before any later delta — see ADR-0003. `where` is the next-page
+  // predicate (bounded by `limit`); `ties` is the unbounded boundary-ties
+  // predicate. They can't collapse into one `where`: ties must be unbounded
+  // while next is limited, an asymmetry a single (where, limit) can't express.
   | {
       t: "fetch"
       fetchId: string
       collection: string
       where?: WireExpression
+      ties?: WireExpression
       orderBy?: WireOrderBy
       limit?: number
     }

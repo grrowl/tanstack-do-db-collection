@@ -151,7 +151,14 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
 
   /** One-shot paginated page fetch — a subset snapshot, NO live registration.
    *  Used by the client for cursor load-more; the window's live deltas already
-   *  flow via the `sub` on the query's `where`. */
+   *  flow via the `sub` on the query's `where`.
+   *
+   *  The cursor double-read (`ties` boundary-equals, unbounded; `where`
+   *  next-page, bounded by `limit`) runs as TWO SELECTs in ONE handler turn:
+   *  synchronous SQLite, no `await` between them, so both observe the same
+   *  database at one `seq`. The page therefore slots into the delta stream at a
+   *  single position — a concurrent mutation is either reflected in it or
+   *  arrives as a delta AFTER it, never split across the two reads (ADR-0003). */
   private handleFetch(ws: WebSocket, frame: Extract<ClientFrame, { t: "fetch" }>): void {
     const coll = this.registry.collections.get(frame.collection)
     if (!coll) {
@@ -160,12 +167,18 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     }
     const seq = String(currentSeq(this.sql))
     try {
-      const query = compileSubsetQuery(frame.collection, {
+      const rows: Array<unknown> = []
+      // Ties first (unbounded boundary set), then the bounded next page.
+      if (frame.ties != null) {
+        const tq = compileSubsetQuery(frame.collection, { where: frame.ties, orderBy: frame.orderBy })
+        rows.push(...Array.from(this.sql.exec(tq.sql, ...tq.params)))
+      }
+      const nq = compileSubsetQuery(frame.collection, {
         where: frame.where,
         orderBy: frame.orderBy,
         limit: frame.limit,
       })
-      const rows = Array.from(this.sql.exec(query.sql, ...query.params)) as Array<unknown>
+      rows.push(...Array.from(this.sql.exec(nq.sql, ...nq.params)))
       this.send(ws, { t: "page", fetchId: frame.fetchId, rows, seq })
     } catch (e) {
       if (e instanceof UnsupportedPredicateError) {

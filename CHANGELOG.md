@@ -16,14 +16,21 @@ While pre-1.0, the public API may change between 0.x releases.
   live subscription's predicate stays the `where` clause, so entering rows are
   still delivered.
 - **Cursor load-more (scroll-back).** Extending a windowed query past its first
-  page issues a one-shot paginated `fetch` (new `fetch`/`page` wire frames),
-  mirroring Electric's double request: all boundary ties (`whereCurrent`, no
-  limit) plus the next page (`whereFrom`, with limit), each combined with the
-  base `where`. No new live subscription is taken — the window's deltas already
-  flow over the existing `where` sub.
+  page issues one one-shot paginated `fetch` (new `fetch`/`page` wire frames)
+  carrying both halves of the cursor double-read — boundary ties (`ties`,
+  unbounded) and the next page (`where`, bounded by `limit`), each combined with
+  the base `where`. The server reads both at a single `seq` (atomic), and no new
+  live subscription is taken — the window's deltas already flow over the existing
+  `where` sub. See [ADR-0003](docs/adr/0003-atomic-cursor-fetch.md).
 
 ### Fixed
 
+- **Cursor load-more no longer resurrects a concurrently-deleted row.** The
+  earlier two-frame double request read the ties at one `seq` but applied them
+  after a deferred merge; a live delete landing in between let the stale tie
+  re-insert the deleted row, with no future delta to correct it. The double-read
+  is now one atomic `fetch`, so the page applies in stream order before any later
+  delta. See [ADR-0003](docs/adr/0003-atomic-cursor-fetch.md).
 - **Cursor load-more no longer throws on overlapping boundary rows.** Page rows
   are written insert-if-absent, so a boundary tie already in the window (or a row
   a concurrent live delta already refreshed) is skipped rather than re-inserted —

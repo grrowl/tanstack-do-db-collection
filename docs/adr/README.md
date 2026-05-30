@@ -10,3 +10,4 @@ explains the displacement.
 | [0000](./0000-record-architecture-decisions.md) | Record architecture decisions | Accepted |
 | [0001](./0001-sync-architecture.md) | Sync architecture: single-ordered-stream over a Durable Object | Accepted (amended by 0002) |
 | [0002](./0002-adversarial-review-corrections.md) | Corrections from adversarial review: ordering, shaping, retention | Accepted |
+| [0003](./0003-atomic-cursor-fetch.md) | Cursor load-more is one atomic fetch, not two | Accepted |

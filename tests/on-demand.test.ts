@@ -47,9 +47,9 @@ type FetchFrame = Extract<ClientFrame, { t: "fetch" }>
 
 // A fake transport that records sub/unsub and immediately completes each
 // subscription's (empty) snapshot, for deterministic refcount tests. `fetch`
-// records the issued frame and returns canned rows keyed by the fetchId suffix
-// (`-ties` / `-next`) so cursor load-more's double request can be asserted.
-function fakeTransport(rows: { ties?: Array<unknown>; next?: Array<unknown> } = {}) {
+// records the issued frame and returns the canned `page` rows — cursor
+// load-more is one atomic fetch carrying both `ties` and `where`.
+function fakeTransport(page: Array<unknown> = []) {
   const subs: Array<{ subId: string; where: unknown }> = []
   const unsubs: Array<string> = []
   const fetches: Array<FetchFrame> = []
@@ -62,9 +62,7 @@ function fakeTransport(rows: { ties?: Array<unknown>; next?: Array<unknown> } = 
     unsubscribe: (subId: string) => unsubs.push(subId),
     fetch: async (frame: FetchFrame) => {
       fetches.push(frame)
-      if (frame.fetchId.endsWith("-ties")) return rows.ties ?? []
-      if (frame.fetchId.endsWith("-next")) return rows.next ?? []
-      return []
+      return page
     },
     sendMut: async () => ({}),
     close: () => {},
@@ -148,13 +146,13 @@ describe("on-demand loadSubset (M11) — refcounting", () => {
 describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => {
   const cursorOrderBy = [{ expression: { type: "ref", path: ["body"] }, compareOptions: { direction: "desc" } }]
 
-  it("issues the double request (ties no-limit + next with-limit) and merges both pages", async () => {
-    const tiesRows = [{ id: "t1", body: "16" }]
-    const nextRows = [
+  it("issues ONE atomic fetch carrying both ties and the next-page predicate", async () => {
+    const page = [
+      { id: "t1", body: "16" },
       { id: "n1", body: "15" },
       { id: "n2", body: "14" },
     ]
-    const { fetches, subs, transport } = fakeTransport({ ties: tiesRows, next: nextRows })
+    const { fetches, subs, transport } = fakeTransport(page)
     const { calls, res } = startOnDemand(transport)
 
     const base = whereEq("room", "r1")
@@ -163,19 +161,18 @@ describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => 
 
     // A cursor load is a one-shot fetch — it registers no live subscription.
     expect(subs.length).toBe(0)
-    // Two requests: ties (boundary equals, NO limit) and next page (WITH limit).
-    expect(fetches.length).toBe(2)
-    const ties = fetches.find((f) => f.fetchId.endsWith("-ties"))!
-    const next = fetches.find((f) => f.fetchId.endsWith("-next"))!
-    expect(ties.limit).toBeUndefined()
-    expect(next.limit).toBe(5)
-    // Each cursor expression is combined with the base `where` (which the cursor
-    // expressions deliberately exclude) via and().
-    expect(ties.where).toEqual(and(base as never, cursor.whereCurrent as never))
-    expect(next.where).toEqual(and(base as never, cursor.whereFrom as never))
-    // Both pages land in the collection as inserts: ties first, then next page.
+    // ONE frame, so the server reads both halves at one seq (atomic).
+    expect(fetches.length).toBe(1)
+    const f = fetches[0]!
+    // `where` = next page (bounded by limit); `ties` = boundary equals (the
+    // server applies no limit to it). Each combined with the base `where`,
+    // which the cursor expressions deliberately exclude.
+    expect(f.limit).toBe(5)
+    expect(f.where).toEqual(and(base as never, cursor.whereFrom as never))
+    expect(f.ties).toEqual(and(base as never, cursor.whereCurrent as never))
+    // The whole page lands in the collection as inserts.
     const writes = calls.filter((c) => c[0] === "write").map((c) => (c[1] as { value: unknown }).value)
-    expect(writes).toEqual([...tiesRows, ...nextRows])
+    expect(writes).toEqual(page)
   })
 
   it("writes page rows insert-if-absent: a tie already in the collection is skipped", async () => {
@@ -183,9 +180,11 @@ describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => 
     // Re-inserting it as a sync `insert` with a stale value would throw
     // DuplicateKeySyncError and abort the open transaction — so it must be
     // skipped, leaving the live sub's value intact.
-    const tiesRows = [{ id: "t1", body: "16" }]
-    const nextRows = [{ id: "n1", body: "15" }]
-    const { transport } = fakeTransport({ ties: tiesRows, next: nextRows })
+    const page = [
+      { id: "t1", body: "16" },
+      { id: "n1", body: "15" },
+    ]
+    const { transport } = fakeTransport(page)
     const { calls, res } = startOnDemand(transport, new Set(["t1"]))
 
     const base = whereEq("room", "r1")
@@ -214,6 +213,60 @@ describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => 
     expect(unsubs.length).toBe(0)
     res.unloadSubset({ where: base }) // releases the live sub
     expect(unsubs).toEqual([subs[0]!.subId])
+  })
+
+  // Hand-computed race (ADR-0003): with the deferred two-frame double request,
+  // a live DELETE for a boundary row landing between the ties read and the
+  // merge resurrected the deleted row. With ONE atomic fetch the page is a
+  // single macrotask whose write completes before the later delete delta is
+  // processed, so the delete wins. Pins that ordering: the page is applied,
+  // THEN the concurrent delete arrives, and the row stays gone.
+  it("does NOT resurrect a row deleted concurrently during scroll-back", async () => {
+    // Real collection state as a Map, so insert-if-absent + delete are real.
+    const rows = new Map<string, Msg>([["m81", { id: "m81", body: "81" }]]) // boundary row, in window
+    const controls = {
+      collection: { get: (k: string) => rows.get(k) },
+      begin: () => {},
+      commit: () => {},
+      markReady: () => {},
+      truncate: () => rows.clear(),
+      write: (m: { type: string; value?: { id: string }; key?: string }) => {
+        if (m.type === "delete") rows.delete(m.key!)
+        else rows.set(m.value!.id, m.value as Msg)
+      },
+    }
+
+    let liveHandler: SubHandler | undefined
+    const transport = {
+      connect: async () => {},
+      subscribe: async (_s: string, _t: string, h: SubHandler) => {
+        liveHandler = h
+        h.onSnapEnd()
+      },
+      unsubscribe: () => {},
+      // One atomic page: ties (m81) + next page (m80) at one seq.
+      fetch: async () => [
+        { id: "m81", body: "81" },
+        { id: "m80", body: "80" },
+      ],
+      sendMut: async () => ({}),
+      close: () => {},
+    } as unknown as WebSocketTransport
+
+    const adapter = doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id, syncMode: "on-demand" })
+    const res = (adapter as unknown as { sync: { sync: (p: unknown) => OnDemand } }).sync.sync(controls)
+
+    await res.loadSubset({ where: whereEq("room", "r1") }) // initial sub -> captures liveHandler
+
+    const cursor = { whereFrom: whereFunc("lt", "body", "81"), whereCurrent: whereEq("body", "81") }
+    // The page resolves and its merge completes (one macrotask) before the
+    // delete delta — the real receive order for a single-frame fetch.
+    await res.loadSubset({ where: whereEq("room", "r1"), orderBy: cursorOrderBy, limit: 5, cursor })
+
+    liveHandler!.onDelta("delete", "m81", undefined) // concurrent delete arrives next
+    liveHandler!.onUptodate()
+
+    expect(rows.has("m81")).toBe(false) // m81 must stay deleted, not be resurrected
   })
 })
 
