@@ -144,6 +144,36 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
         return this.handleMut(ws, frame)
       case "call":
         return this.handleCall(ws, frame)
+      case "fetch":
+        return this.handleFetch(ws, frame)
+    }
+  }
+
+  /** One-shot paginated page fetch — a subset snapshot, NO live registration.
+   *  Used by the client for cursor load-more; the window's live deltas already
+   *  flow via the `sub` on the query's `where`. */
+  private handleFetch(ws: WebSocket, frame: Extract<ClientFrame, { t: "fetch" }>): void {
+    const coll = this.registry.collections.get(frame.collection)
+    if (!coll) {
+      this.send(ws, { t: "page", fetchId: frame.fetchId, rows: [], seq: "0" })
+      return
+    }
+    const seq = String(currentSeq(this.sql))
+    try {
+      const query = compileSubsetQuery(frame.collection, {
+        where: frame.where,
+        orderBy: frame.orderBy,
+        limit: frame.limit,
+      })
+      const rows = Array.from(this.sql.exec(query.sql, ...query.params)) as Array<unknown>
+      this.send(ws, { t: "page", fetchId: frame.fetchId, rows, seq })
+    } catch (e) {
+      if (e instanceof UnsupportedPredicateError) {
+        console.error(`fetch '${frame.fetchId}' on '${frame.collection}' rejected: ${e.message}`)
+        this.send(ws, { t: "page", fetchId: frame.fetchId, rows: [], seq })
+        return
+      }
+      throw e
     }
   }
 

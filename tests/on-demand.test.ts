@@ -1,8 +1,9 @@
-import { createCollection, createLiveQueryCollection, eq } from "@tanstack/db"
+import { and, createCollection, createLiveQueryCollection, eq } from "@tanstack/db"
 import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions } from "../src/client/do-collection.ts"
 import { type SubHandler, WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
+import type { ClientFrame } from "../src/wire/frames.ts"
 
 // WHY: on-demand loads ONLY the subsets live queries request, instead of
 // syncing the whole collection. These pin: distinct `where`s become distinct
@@ -15,14 +16,15 @@ interface Msg {
   body: string
 }
 
-const whereEq = (field: string, value: unknown): unknown => ({
+const whereFunc = (name: string, field: string, value: unknown): unknown => ({
   type: "func",
-  name: "eq",
+  name,
   args: [
     { type: "ref", path: [field] },
     { type: "val", value },
   ],
 })
+const whereEq = (field: string, value: unknown): unknown => whereFunc("eq", field, value)
 
 const spyControls = () => {
   const calls: Array<[string, ...Array<unknown>]> = []
@@ -39,11 +41,16 @@ const spyControls = () => {
   }
 }
 
+type FetchFrame = Extract<ClientFrame, { t: "fetch" }>
+
 // A fake transport that records sub/unsub and immediately completes each
-// subscription's (empty) snapshot, for deterministic refcount tests.
-function fakeTransport() {
+// subscription's (empty) snapshot, for deterministic refcount tests. `fetch`
+// records the issued frame and returns canned rows keyed by the fetchId suffix
+// (`-ties` / `-next`) so cursor load-more's double request can be asserted.
+function fakeTransport(rows: { ties?: Array<unknown>; next?: Array<unknown> } = {}) {
   const subs: Array<{ subId: string; where: unknown }> = []
   const unsubs: Array<string> = []
+  const fetches: Array<FetchFrame> = []
   const transport = {
     connect: async () => {},
     subscribe: async (subId: string, _table: string, handler: SubHandler, where?: unknown) => {
@@ -51,15 +58,27 @@ function fakeTransport() {
       handler.onSnapEnd() // empty snapshot -> resolves loadSubset
     },
     unsubscribe: (subId: string) => unsubs.push(subId),
+    fetch: async (frame: FetchFrame) => {
+      fetches.push(frame)
+      if (frame.fetchId.endsWith("-ties")) return rows.ties ?? []
+      if (frame.fetchId.endsWith("-next")) return rows.next ?? []
+      return []
+    },
     sendMut: async () => ({}),
     close: () => {},
   } as unknown as WebSocketTransport
-  return { subs, unsubs, transport }
+  return { subs, unsubs, fetches, transport }
 }
 
+interface LoadOpts {
+  where?: unknown
+  orderBy?: unknown
+  limit?: number
+  cursor?: { whereFrom: unknown; whereCurrent: unknown; lastKey?: unknown }
+}
 type OnDemand = {
-  loadSubset: (o: { where?: unknown }) => true | Promise<void>
-  unloadSubset: (o: { where?: unknown }) => void
+  loadSubset: (o: LoadOpts) => true | Promise<void>
+  unloadSubset: (o: LoadOpts) => void
 }
 const startOnDemand = (transport: WebSocketTransport) => {
   const { calls, controls } = spyControls()
@@ -99,6 +118,60 @@ describe("on-demand loadSubset (M11) — refcounting", () => {
     await res.loadSubset({ where: whereEq("body", "y") })
     expect(subs.map((s) => s.where)).toEqual([whereEq("body", "x"), whereEq("body", "y")])
     expect(subs.length).toBe(2)
+  })
+})
+
+describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => {
+  const cursorOrderBy = [{ expression: { type: "ref", path: ["body"] }, compareOptions: { direction: "desc" } }]
+
+  it("issues the double request (ties no-limit + next with-limit) and merges both pages", async () => {
+    const tiesRows = [{ id: "t1", body: "16" }]
+    const nextRows = [
+      { id: "n1", body: "15" },
+      { id: "n2", body: "14" },
+    ]
+    const { fetches, subs, transport } = fakeTransport({ ties: tiesRows, next: nextRows })
+    const { calls, res } = startOnDemand(transport)
+
+    const base = whereEq("room", "r1")
+    const cursor = { whereFrom: whereFunc("lt", "body", "16"), whereCurrent: whereEq("body", "16"), lastKey: "t1" }
+    await res.loadSubset({ where: base, orderBy: cursorOrderBy, limit: 5, cursor })
+
+    // A cursor load is a one-shot fetch — it registers no live subscription.
+    expect(subs.length).toBe(0)
+    // Two requests: ties (boundary equals, NO limit) and next page (WITH limit).
+    expect(fetches.length).toBe(2)
+    const ties = fetches.find((f) => f.fetchId.endsWith("-ties"))!
+    const next = fetches.find((f) => f.fetchId.endsWith("-next"))!
+    expect(ties.limit).toBeUndefined()
+    expect(next.limit).toBe(5)
+    // Each cursor expression is combined with the base `where` (which the cursor
+    // expressions deliberately exclude) via and().
+    expect(ties.where).toEqual(and(base as never, cursor.whereCurrent as never))
+    expect(next.where).toEqual(and(base as never, cursor.whereFrom as never))
+    // Both pages land in the collection as inserts: ties first, then next page.
+    const writes = calls.filter((c) => c[0] === "write").map((c) => (c[1] as { value: unknown }).value)
+    expect(writes).toEqual([...tiesRows, ...nextRows])
+  })
+
+  it("takes no live refcount, so a sibling query's sub survives its unload", async () => {
+    const { subs, unsubs, transport } = fakeTransport()
+    const { res } = startOnDemand(transport)
+    const base = whereEq("room", "r1")
+
+    await res.loadSubset({ where: base }) // initial live sub, refs = 1
+    expect(subs.length).toBe(1)
+
+    const cursor = { whereFrom: whereFunc("lt", "body", "16"), whereCurrent: whereEq("body", "16") }
+    await res.loadSubset({ where: base, orderBy: cursorOrderBy, limit: 5, cursor }) // one-shot
+    expect(subs.length).toBe(1) // no new sub
+
+    // The framework unloads EVERY loadedSubset, cursor loads included. A cursor
+    // unload must be a no-op or it would under-count the still-live base sub.
+    res.unloadSubset({ where: base, orderBy: cursorOrderBy, limit: 5, cursor })
+    expect(unsubs.length).toBe(0)
+    res.unloadSubset({ where: base }) // releases the live sub
+    expect(unsubs).toEqual([subs[0]!.subId])
   })
 })
 
@@ -166,6 +239,31 @@ describe("on-demand loadSubset (M11) — against the DO", () => {
     expect(top5.toArray.map((m) => m.body)).toEqual(["20", "19", "18", "17", "16"])
     // The collection loaded ONLY the bounded window, not all 20.
     expect(messages.size).toBe(5)
+    t.close()
+  })
+
+  it("fetch returns a bounded ordered page (scroll-back round-trip)", async () => {
+    const room = "od-fetch"
+    const t = realTransport(room)
+    await t.connect()
+    await runInDurableObject(env.SYNC_DO.get(env.SYNC_DO.idFromName(room)), (_i, s) => {
+      for (let i = 1; i <= 20; i++) {
+        s.storage.sql.exec("INSERT INTO messages(id,body) VALUES(?,?)", `m${i}`, String(i).padStart(2, "0"))
+      }
+    })
+
+    // Window already showed 20..16; scrolling back fetches the next page
+    // strictly below "16", newest-first, bounded by the limit.
+    const orderBy = [{ expression: { type: "ref", path: ["body"] }, compareOptions: { direction: "desc" } }]
+    const rows = (await t.fetch({
+      t: "fetch",
+      fetchId: "f1",
+      collection: "messages",
+      where: whereFunc("lt", "body", "16"),
+      orderBy,
+      limit: 5,
+    })) as Array<Msg>
+    expect(rows.map((r) => r.body)).toEqual(["15", "14", "13", "12", "11"])
     t.close()
   })
 

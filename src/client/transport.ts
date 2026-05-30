@@ -85,6 +85,10 @@ export class WebSocketTransport {
   private appliedSeq = 0n
   private readonly seqWaiters: Array<SeqWaiter> = []
   private readonly pendingTx = new Map<string, TxWaiter>()
+  private readonly pendingFetches = new Map<
+    string,
+    { resolve: (rows: Array<unknown>) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }
+  >()
   /** Suppresses auto-reconnect after an intentional close(). */
   private intentionallyClosed = false
   /** True while reconnecting, so connect() resubscribes on success. */
@@ -175,6 +179,11 @@ export class WebSocketTransport {
       w.reject(new Error("transport closed"))
     }
     this.pendingTx.clear()
+    for (const [, w] of this.pendingFetches) {
+      clearTimeout(w.timer)
+      w.reject(new Error("transport closed"))
+    }
+    this.pendingFetches.clear()
     try {
       this.ws?.close()
     } catch {
@@ -208,6 +217,19 @@ export class WebSocketTransport {
 
   sendCall(frame: Extract<ClientFrame, { t: "call" }>): Promise<{ result?: unknown }> {
     return this.sendAwaitingReceipt(frame, frame.txId)
+  }
+
+  /** One-shot page fetch; resolves with the page's rows. No live subscription. */
+  async fetch(frame: Extract<ClientFrame, { t: "fetch" }>): Promise<Array<unknown>> {
+    await this.connect()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingFetches.delete(frame.fetchId)
+        reject(new Error(`fetch timeout: ${frame.fetchId}`))
+      }, this.timeoutMs)
+      this.pendingFetches.set(frame.fetchId, { resolve, reject, timer })
+      this.sendFrame(frame)
+    })
   }
 
   /** Resolves once `appliedSeq >= target`. */
@@ -279,6 +301,15 @@ export class WebSocketTransport {
           clearTimeout(w.timer)
           this.pendingTx.delete(frame.txId)
           w.reject(new MutationRejectedError(frame.error.message, frame.error.code))
+        }
+        return
+      }
+      case "page": {
+        const w = this.pendingFetches.get(frame.fetchId)
+        if (w) {
+          clearTimeout(w.timer)
+          this.pendingFetches.delete(frame.fetchId)
+          w.resolve(frame.rows)
         }
         return
       }

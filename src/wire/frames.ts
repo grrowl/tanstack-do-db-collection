@@ -40,6 +40,17 @@ export type ClientFrame =
   | { t: "unsub"; subId: string }
   | { t: "mut"; txId: TxId; collection: string; ops: Array<MutOp> }
   | { t: "call"; txId: TxId; name: string; args: unknown }
+  // One-shot paginated page fetch — a subset snapshot with NO live
+  // subscription. Used for cursor load-more (scroll-back); deltas for the
+  // window already flow via the live `sub` on the query's `where`.
+  | {
+      t: "fetch"
+      fetchId: string
+      collection: string
+      where?: WireExpression
+      orderBy?: WireOrderBy
+      limit?: number
+    }
 
 export type ServerFrame =
   // Snapshot rows (full row) then a boundary; client truncates + applies.
@@ -54,6 +65,8 @@ export type ServerFrame =
   | { t: "rejected"; txId: TxId; error: { code?: string; message: string } }
   // Compaction/rotation reset — client truncates and resnapshots (ADR-0002 C5).
   | { t: "reset"; sub?: string }
+  // Response to a `fetch`: the page's rows, in one frame (no live sub).
+  | { t: "page"; fetchId: string; rows: Array<unknown>; seq: Cursor }
 
 export type Frame = ClientFrame | ServerFrame
 export type FrameTag = Frame["t"]

@@ -15,7 +15,7 @@
 //     loaded subset are confirmed and their optimistic overlay retired by a
 //     post-mutation empty sync commit (ADR-0002 C2, verified).
 
-import { compileSingleRowExpression, toBooleanPredicate, type CollectionConfig } from "@tanstack/db"
+import { and, compileSingleRowExpression, toBooleanPredicate, type CollectionConfig } from "@tanstack/db"
 import type { MutOp, RowOp } from "../wire/frames.ts"
 import { type SubHandler, WebSocketTransport } from "./transport.ts"
 
@@ -61,12 +61,13 @@ interface SyncParams {
   truncate: () => void
 }
 
-/** Subset of @tanstack/db's LoadSubsetOptions we consume (where-based v1). */
+/** Subset of @tanstack/db's LoadSubsetOptions we consume. */
 interface LoadSubsetOptions {
   where?: unknown
   orderBy?: unknown
   limit?: number
   offset?: number
+  cursor?: { whereFrom: unknown; whereCurrent: unknown; lastKey?: unknown }
 }
 
 function compilePredicate(where: unknown): (row: Record<string, unknown>) => boolean {
@@ -139,7 +140,37 @@ export function doCollectionOptions<T extends object>(
       const loaded = new Map<string, { subId: string; refs: number; ready: Promise<void> }>()
       const keyOf = (o: LoadSubsetOptions): string => JSON.stringify(o.where ?? null)
 
+      // Cursor load-more (scroll-back). The live sub on `where` already streams
+      // deltas for the whole subset, so this is a one-shot fetch of the older
+      // rows the window now needs — NOT a new live registration. Mirrors
+      // Electric's double request: `whereCurrent` collects ALL boundary ties
+      // (no limit — a prior page's limit may have split a run of equal order
+      // values), `whereFrom` collects the next `limit` rows strictly after the
+      // cursor. Both exclude the base `where`, so we re-combine with it.
+      //
+      // Note: the page is a point-in-time snapshot at the server's fetch seq.
+      // A concurrent delta on one of these (older) rows, arriving via the live
+      // sub between the server's SELECT and our write, could be clobbered by the
+      // stale page row. These are historical rows (rarely mutated mid-scroll);
+      // the next delta for that row re-corrects it. Accepted for v1.
+      const loadMore = async (o: LoadSubsetOptions): Promise<void> => {
+        const cursor = o.cursor!
+        const base = o.where
+        const tiesWhere = base != null ? and(base as never, cursor.whereCurrent as never) : cursor.whereCurrent
+        const nextWhere = base != null ? and(base as never, cursor.whereFrom as never) : cursor.whereFrom
+        const fid = `${table}#fetch#${++subSeq}`
+        const [ties, next] = await Promise.all([
+          transport.fetch({ t: "fetch", fetchId: `${fid}-ties`, collection: table, where: tiesWhere, orderBy: o.orderBy }),
+          transport.fetch({ t: "fetch", fetchId: `${fid}-next`, collection: table, where: nextWhere, orderBy: o.orderBy, limit: o.limit }),
+        ])
+        ensureBegin()
+        for (const r of ties) write({ type: "insert", value: r })
+        for (const r of next) write({ type: "insert", value: r })
+        flush()
+      }
+
       const loadSubset = (o: LoadSubsetOptions): true | Promise<void> => {
+        if (o.cursor) return loadMore(o)
         const key = keyOf(o)
         const existing = loaded.get(key)
         if (existing) {
@@ -160,6 +191,11 @@ export function doCollectionOptions<T extends object>(
       }
 
       const unloadSubset = (o: LoadSubsetOptions): void => {
+        // Symmetric with loadSubset: a cursor load was a one-shot fetch that
+        // never took a refcount, so its unload must not release one either —
+        // otherwise a second live query on the same `where` is under-counted
+        // and its still-live sub is torn down early.
+        if (o.cursor) return
         const key = keyOf(o)
         const entry = loaded.get(key)
         if (entry && --entry.refs <= 0) {

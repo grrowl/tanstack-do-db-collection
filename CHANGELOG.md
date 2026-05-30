@@ -8,7 +8,26 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Bounded initial load for on-demand windows.** A live query's `orderBy` and
+  `limit` are forwarded to the server so the initial snapshot is the bounded
+  window (e.g. the most recent N rows) rather than the whole `where` subset. The
+  live subscription's predicate stays the `where` clause, so entering rows are
+  still delivered.
+- **Cursor load-more (scroll-back).** Extending a windowed query past its first
+  page issues a one-shot paginated `fetch` (new `fetch`/`page` wire frames),
+  mirroring Electric's double request: all boundary ties (`whereCurrent`, no
+  limit) plus the next page (`whereFrom`, with limit), each combined with the
+  base `where`. No new live subscription is taken — the window's deltas already
+  flow over the existing `where` sub.
+
+### Fixed
+
+- **On-demand `orderBy` IR shape.** `orderBy` clauses from real live queries
+  (`{ expression, compareOptions }`) were not recognised by the SQL compiler, so
+  server-side ordering was silently dropped and the wrong rows were returned for
+  a bounded window. The compiler now accepts the live-query clause shape.
 
 ## [0.0.1]
 
