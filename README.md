@@ -158,6 +158,29 @@ One `WebSocketTransport` per DO is shared by every collection on that DO
 
 ---
 
+## Examples
+
+Each is a runnable Worker + browser client (`npm install && npm run dev`),
+browser-verified.
+
+- **[`examples/chat`](./examples/chat)** — eager sync of a room's messages;
+  multi-tab live updates. The smallest end-to-end shape.
+- **[`examples/on-demand`](./examples/on-demand)** — `syncMode: 'on-demand'`:
+  categorised items where each panel loads only its subset (`loadSubset`/
+  `unloadSubset`) and unopened categories are never synced.
+- **[`examples/board`](./examples/board)** — the at-scale stress test: 5,000
+  tasks on one DO with a bounded window, `useLiveInfiniteQuery` cursor
+  scroll-back, and a mutable order key so voting bumps a task to the top
+  (move-in). Its firehose makes the deferred bounded-window-under-churn
+  limitation visible — `loaded` climbs past `window`.
+
+> Using on-demand with `orderBy` + `limit`? Add a **range index** on the order
+> column (`collection.createIndex((r) => r.field, { indexType: BTreeIndex })`) —
+> without it the window can't page lazily and falls back to loading the whole
+> subset. See `examples/board`.
+
+---
+
 ## Non-goals
 
 - **Multi-DO transactions.** A transaction touches collections in one DO.
