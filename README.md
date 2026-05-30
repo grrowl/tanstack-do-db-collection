@@ -101,6 +101,11 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
         const c = op.cols as { id: string; author: string; content: string; created_at: number }
         sql.exec("INSERT INTO messages(id,author,content,created_at) VALUES(?,?,?,?)", c.id, c.author, c.content, c.created_at)
       },
+      // afterCommit (optional) runs fire-and-forget AFTER the commit + receipt —
+      // the home for external side effects execute can't do (delete an R2 object,
+      // enqueue a job). Receives `env`; isolated (a throw never affects the
+      // committed write) and owns its own idempotency. See ADR-0004.
+      // afterCommit: async ({ op, env }) => { await env.BUCKET.delete(op.key as string) },
     })
 
   // Read the Worker-forged claims header into the per-socket attachment.

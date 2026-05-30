@@ -35,7 +35,7 @@ import { SubscriptionRegistry } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
   /** Subclasses declare their collections, mutations, and commands. */
-  protected abstract registry: Registry<TUser>
+  protected abstract registry: Registry<TUser, Env>
 
   /** Wire codec. Binary MessagePack by default; override for a JSON transport. */
   protected readonly codec: FrameCodec = createFrameCodec()
@@ -212,7 +212,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       for (const op of f.ops) {
         const def = this.registry.mutations.get(`${f.collection}:${op.type}`)
         if (!def) throw new Error(`no mutation handler for '${f.collection}:${op.type}'`)
-        if (def.authorize) await def.authorize({ user, op, sql: this.sql })
+        if (def.authorize) await def.authorize({ user, op, sql: this.sql, env: this.env })
       }
     } catch (e) {
       return this.rejectTx(ws, f.txId, errorMessage(e))
@@ -225,7 +225,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       this.ctx.storage.transactionSync(() => {
         for (const op of f.ops) {
           const def = this.registry.mutations.get(`${f.collection}:${op.type}`)!
-          const result = def.execute({ user, op, sql: this.sql }) as unknown
+          const result = def.execute({ user, op, sql: this.sql, env: this.env }) as unknown
           if (result !== undefined && typeof (result as PromiseLike<unknown>).then === "function") {
             throw new Error(`mutation '${f.collection}:${op.type}' execute must be synchronous`)
           }
@@ -243,6 +243,25 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     this.drainAndBroadcast()
     this.broadcaster.flushOne(ws)
     this.send(ws, { t: "committed", txId: f.txId, seq: commitSeq })
+
+    // Fire-and-forget post-commit hooks AFTER the receipt — never on the
+    // client's critical path. Each runs under `waitUntil` (keeps the DO alive
+    // until it settles) and is isolated: a throw is logged and dropped, leaving
+    // the committed mutation untouched. The hook owns its own idempotency
+    // (ADR-0004); the library guarantees only "runs once per commit, off-path".
+    for (const op of f.ops) {
+      const after = this.registry.mutations.get(`${f.collection}:${op.type}`)?.afterCommit
+      if (!after) continue
+      this.ctx.waitUntil(
+        (async () => {
+          try {
+            await after({ user, op, sql: this.sql, env: this.env })
+          } catch (e) {
+            console.error(`afterCommit '${f.collection}:${op.type}' failed: ${errorMessage(e)}`)
+          }
+        })(),
+      )
+    }
   }
 
   /** Run a named command (outside any transaction) and confirm with its result. */
@@ -256,8 +275,8 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     const user = this.userFor(ws)
     let result: unknown
     try {
-      if (def.authorize) await def.authorize({ user, args: f.args, sql: this.sql })
-      result = await def.execute({ user, args: f.args, sql: this.sql })
+      if (def.authorize) await def.authorize({ user, args: f.args, sql: this.sql, env: this.env })
+      result = await def.execute({ user, args: f.args, sql: this.sql, env: this.env })
     } catch (e) {
       return this.rejectTx(ws, f.txId, errorMessage(e))
     }

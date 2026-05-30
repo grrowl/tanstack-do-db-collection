@@ -10,6 +10,15 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Added
 
+- **`afterCommit` post-commit hook + `env` in handler context.** Mutations gain
+  an optional `afterCommit(ctx)` that runs fire-and-forget via `waitUntil` after
+  the commit and receipt — the sanctioned home for external side effects a
+  synchronous `execute` can't do (delete an R2 object, enqueue a job). It's
+  isolated (a throw is logged, never affects the committed mutation) and owns its
+  own idempotency. Handler contexts (`authorize`/`execute`/`afterCommit` and
+  command `execute`) now receive the DO's `env`, typed via a new `Env` generic on
+  `Registry` that defaults to `unknown` (existing `Registry<TUser>` unchanged).
+  See [ADR-0004](docs/adr/0004-after-commit-hook.md).
 - **Bounded initial load for on-demand windows.** A live query's `orderBy` and
   `limit` are forwarded to the server so the initial snapshot is the bounded
   window (e.g. the most recent N rows) rather than the whole `where` subset. The

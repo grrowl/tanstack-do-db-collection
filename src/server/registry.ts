@@ -17,42 +17,62 @@ export interface CollectionDef {
   ddl: string
 }
 
-/** Context for a mutation handler. `execute` runs inside `transactionSync`. */
-export interface MutationCtx<TUser> {
+/** Context for a mutation handler. `env` is the DO's binding env, so handlers
+ *  can reach external resources (R2/KV/services) — essential for `afterCommit`
+ *  side effects and useful in `authorize`. `execute` runs inside
+ *  `transactionSync`, so it cannot await env, but may read synchronous config. */
+export interface MutationCtx<TUser, Env = unknown> {
   user: TUser
   op: MutOp
   sql: SqlStorage
+  env: Env
 }
 
-export interface MutationDef<TUser> {
+export interface MutationDef<TUser, Env = unknown> {
   collection: string
   type: RowOp
   /** Runs BEFORE the transaction; may be async (read other rows, call out).
    *  Throw to deny — the frame is rejected and nothing is applied. */
-  authorize?: (ctx: MutationCtx<TUser>) => void | Promise<void>
+  authorize?: (ctx: MutationCtx<TUser, Env>) => void | Promise<void>
   /** Runs INSIDE `transactionSync` — MUST be synchronous (ADR-0001 D11/C6). */
-  execute: (ctx: MutationCtx<TUser>) => void
+  execute: (ctx: MutationCtx<TUser, Env>) => void
+  /**
+   * Fire-and-forget async post-work, run via `ctx.waitUntil` AFTER the mutation
+   * commits and its receipt is sent — never blocking the client. This is the
+   * sanctioned home for external side effects a synchronous `execute` can't do
+   * (delete an R2 object, enqueue a job). It receives the committed `env`/`sql`.
+   *
+   * It has no retry and no ordering guarantee: a thrown error or a DO eviction
+   * mid-effect just drops THIS invocation. Make the work idempotent and
+   * level-triggered (query "what still needs doing", act, mark done) so a later
+   * trigger — the next such mutation, or a boot-time sweep in your DO — finishes
+   * whatever a dropped invocation left. Don't put the durable state change here;
+   * that belongs in `execute`.
+   */
+  afterCommit?: (ctx: MutationCtx<TUser, Env>) => unknown | Promise<unknown>
 }
 
 /** Context for a command handler. `execute` runs outside any transaction. */
-export interface CommandCtx<TUser> {
+export interface CommandCtx<TUser, Env = unknown> {
   user: TUser
   args: unknown
   sql: SqlStorage
+  env: Env
 }
 
-export interface CommandDef<TUser> {
+export interface CommandDef<TUser, Env = unknown> {
   name: string
-  authorize?: (ctx: CommandCtx<TUser>) => void | Promise<void>
-  /** Side-effecting command; may be async. Result is returned on `committed`. */
-  execute: (ctx: CommandCtx<TUser>) => unknown | Promise<unknown>
+  authorize?: (ctx: CommandCtx<TUser, Env>) => void | Promise<void>
+  /** Side-effecting command; may be async (so external effects can run inline,
+   *  unlike a mutation's synchronous execute). Result is returned on `committed`. */
+  execute: (ctx: CommandCtx<TUser, Env>) => unknown | Promise<unknown>
 }
 
-export class Registry<TUser = unknown> {
+export class Registry<TUser = unknown, Env = unknown> {
   readonly collections = new Map<string, CollectionDef>()
   /** Keyed by `${collection}:${type}`. */
-  readonly mutations = new Map<string, MutationDef<TUser>>()
-  readonly commands = new Map<string, CommandDef<TUser>>()
+  readonly mutations = new Map<string, MutationDef<TUser, Env>>()
+  readonly commands = new Map<string, CommandDef<TUser, Env>>()
 
   defineCollection(def: CollectionDef): this {
     assertValidCollection(def)
@@ -63,7 +83,7 @@ export class Registry<TUser = unknown> {
     return this
   }
 
-  defineMutation(def: MutationDef<TUser>): this {
+  defineMutation(def: MutationDef<TUser, Env>): this {
     if (!this.collections.has(def.collection)) {
       throw new Error(`defineMutation: unknown collection '${def.collection}' — define the collection first`)
     }
@@ -73,7 +93,7 @@ export class Registry<TUser = unknown> {
     return this
   }
 
-  defineCommand(def: CommandDef<TUser>): this {
+  defineCommand(def: CommandDef<TUser, Env>): this {
     if (this.commands.has(def.name)) throw new Error(`command '${def.name}' is already defined`)
     this.commands.set(def.name, def)
     return this

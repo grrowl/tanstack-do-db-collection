@@ -67,6 +67,25 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
         sql.exec("INSERT INTO files(id, name) VALUES (?, ?)", c.id, c.name)
       },
     })
+    // `files:delete` exercises afterCommit: the synchronous execute is the
+    // durable write; afterCommit is fire-and-forget async post-work (here it
+    // records a marker proving both `sql` and `env` reached the hook).
+    .defineMutation({
+      collection: "files",
+      type: "delete",
+      execute: ({ op, sql }) => {
+        sql.exec("DELETE FROM files WHERE id = ?", op.key as string)
+      },
+      afterCommit: async ({ op, sql, env }) => {
+        // A genuine async hop, to prove afterCommit awaits and runs off the
+        // request path. `_afterlog` is a plain side table (no CDC triggers).
+        await Promise.resolve()
+        if ((op.key as string) === "boom") throw new Error("afterCommit boom")
+        sql.exec("CREATE TABLE IF NOT EXISTS _afterlog (key TEXT PRIMARY KEY, tag TEXT)")
+        const hasEnv = (env as { SYNC_DO?: unknown }).SYNC_DO ? "has-env" : "no-env"
+        sql.exec("INSERT OR REPLACE INTO _afterlog(key, tag) VALUES (?, ?)", op.key as string, hasEnv)
+      },
+    })
     .defineCommand({
       name: "echo",
       execute: ({ args }) => ({ echoed: args }),
