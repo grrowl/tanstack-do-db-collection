@@ -15,3 +15,4 @@ explains the displacement.
 | [0005](./0005-fetch-frame-mirrors-loadsubsetoptions.md) | The cursor `fetch` frame mirrors TanStack's `LoadSubsetOptions` | Accepted |
 | [0006](./0006-server-originated-writes.md) | Server-originated writes: `runSyncedWrite` | Accepted (init caveat retired by 0007) |
 | [0007](./0007-author-owned-schema-register-sync.md) | Author-owned schema; `registerSync` wires the sync | Accepted |
+| [0008](./0008-orphaned-cdc-triggers.md) | Orphaned CDC triggers when a collection is removed | Proposed (backlog) |
