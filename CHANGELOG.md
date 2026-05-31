@@ -32,6 +32,12 @@ While pre-1.0, the public API may change between 0.x releases.
   loudly instead of degrading to an unbounded scan. See
   [ADR-0005](docs/adr/0005-fetch-frame-mirrors-loadsubsetoptions.md).
 
+- **Collection pk validation accepts TEXT *affinity*, not the literal `"TEXT"`.**
+  `registerSync` now admits any TEXT-affinity pk (`TEXT`, `VARCHAR`, `CHAR`,
+  `NVARCHAR`, …) so ORM/migrator-generated DDL composes; `INTEGER` (rowid alias)
+  and other non-TEXT affinities are still rejected loudly (they'd break optimistic
+  id parity). Part of ADR-0007.
+
 ### Added
 
 - **`runSyncedWrite(fn)`** — a `protected` `SyncDurableObject` primitive for

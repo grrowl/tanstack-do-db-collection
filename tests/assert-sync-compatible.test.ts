@@ -38,21 +38,21 @@ describe("assertSyncCompatible (ADR-0007, D9) — real-table introspection", () 
   it("rejects an INTEGER rowid-alias primary key", async () => {
     await withSql((sql) => {
       sql.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)")
-      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/must be TEXT/)
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/TEXT affinity/)
     })
   })
 
   it("rejects AUTOINCREMENT (server-assigned key breaks id parity)", async () => {
     await withSql((sql) => {
       sql.exec("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT)")
-      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/must be TEXT/)
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/TEXT affinity/)
     })
   })
 
   it("rejects a non-TEXT pk type", async () => {
     await withSql((sql) => {
       sql.exec("CREATE TABLE t (id BLOB PRIMARY KEY)")
-      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/must be TEXT/)
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/TEXT affinity/)
     })
   })
 

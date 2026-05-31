@@ -77,12 +77,12 @@ export function installTriggers(sql: SqlStorage, tbl: string, pk: string): void 
 
 /**
  * Validate that an author-created table is sync-compatible (ADR-0007, D9): the
- * declared `pk` must be the table's SOLE primary key and typed `TEXT` (a
- * client-supplied stable key). Rejects a missing table, a composite/wrong pk,
- * and an `INTEGER PRIMARY KEY` (the rowid alias — server-assigned, which breaks
- * optimistic id parity). Introspects the real table, so it works however the
- * author created it. `pragma_table_info` is the table-valued form, so the table
- * name binds as a parameter.
+ * declared `pk` must be the table's SOLE primary key and have TEXT affinity (a
+ * client-supplied stable key: TEXT/VARCHAR/CHAR/…). Rejects a missing table, a
+ * composite/wrong pk, and an `INTEGER PRIMARY KEY` (the rowid alias —
+ * server-assigned, which breaks optimistic id parity). Introspects the real
+ * table, so it works however the author created it. `pragma_table_info` is the
+ * table-valued form, so the table name binds as a parameter.
  */
 export function assertSyncCompatible(sql: SqlStorage, tbl: string, pk: string): void {
   const cols = Array.from(
@@ -100,11 +100,28 @@ export function assertSyncCompatible(sql: SqlStorage, tbl: string, pk: string): 
       `collection '${tbl}': '${pk}' must be the sole PRIMARY KEY (D9) — got [${pks.map((c) => c.name).join(", ") || "none"}]`,
     )
   }
-  if (pks[0]!.type.toUpperCase() !== "TEXT") {
+  if (!hasTextAffinity(pks[0]!.type)) {
     throw new Error(
-      `collection '${tbl}': pk '${pk}' must be TEXT (client-supplied key, no AUTOINCREMENT); got '${pks[0]!.type || "(none)"}'`,
+      `collection '${tbl}': pk '${pk}' must have TEXT affinity (TEXT, VARCHAR, CHAR, …) so it ` +
+        `stores the client-supplied id verbatim; got '${pks[0]!.type || "(no type)"}'. An INTEGER ` +
+        `key aliases rowid (server-assigned) and breaks optimistic id parity (D9).`,
     )
   }
+}
+
+/**
+ * SQLite TEXT affinity, per the type-affinity rules (in order): a type
+ * containing "INT" is INTEGER affinity; otherwise one containing CHAR/CLOB/TEXT
+ * is TEXT. So this accepts `TEXT`, `VARCHAR(n)`, `NVARCHAR`, `CHARACTER`,
+ * `CLOB`, … (however a migrator or ORM spells a string key) and rejects
+ * `INTEGER` (the rowid/AUTOINCREMENT footgun), `REAL`/`NUMERIC`, and untyped
+ * (BLOB-affinity) columns. We require TEXT affinity because the key must
+ * preserve the client string exactly — a non-TEXT affinity could coerce it.
+ */
+function hasTextAffinity(declaredType: string): boolean {
+  const t = (declaredType || "").toUpperCase()
+  if (t.includes("INT")) return false
+  return t.includes("CHAR") || t.includes("CLOB") || t.includes("TEXT")
 }
 
 /** Highest `seq` in the log — the current cursor / write-confirmation receipt. */

@@ -121,6 +121,15 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
 }
 ```
 
+> **Schema & migrations.** You own the table — create it with anything (raw
+> `CREATE TABLE`, Drizzle, a versioned migrator), then call `registerSync` to
+> wire CDC. The pk must have **TEXT affinity** (`TEXT`, `VARCHAR`, `CHAR`, …) so
+> it stores the client-supplied id verbatim; an `INTEGER` key is rejected — it
+> aliases rowid (server-assigned) and breaks optimistic id parity. Evolve
+> freely: the CDC triggers capture only the row key, so `ALTER TABLE ADD COLUMN`
+> flows to clients with no re-wiring, and re-running `registerSync` on the next
+> deploy is idempotent (ADR-0007).
+
 > Server-side writes outside the client flow — an agent inserting a row, a
 > webhook, a cron job, a bulk seed — go through `this.runSyncedWrite(sql => …)`:
 > it applies your write and broadcasts it to connected clients (ADR-0006).
