@@ -74,6 +74,12 @@ Each is load-bearing and guarded by an ADR — read it before you touch the area
 
 - **TDD.** Tests run inside workerd; isolate by **unique DO name**, not storage
   rollback. A test pins intent, not mechanics.
+- **Test the deferred effect, not just the function.** Work behind `ctx.waitUntil`
+  / alarms / timers escapes coverage easily — `maybeCompact`'s housekeeping ran
+  untested for milestones because tests called `compactChanges`/`pruneChanges`
+  directly (ADR-0009). Drive the real path and **poll for the effect** (the
+  `waitFor` pattern); the cadence gate is synchronously observable below
+  threshold, so "not yet" is a race-free assertion.
 - **One decision → one ADR.** Conventional commits (`!` = breaking); end with the
   Co-Authored-By trailer. Commit/push only when asked; `main` is the release
   branch.
