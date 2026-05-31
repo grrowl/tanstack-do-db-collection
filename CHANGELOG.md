@@ -8,6 +8,10 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.2.0] — 2026-05-31
+
 ### Changed
 
 - **Author-owned schema; `registerSync` wires the sync.** Breaking. Collection
