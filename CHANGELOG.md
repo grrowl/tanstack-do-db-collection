@@ -8,7 +8,13 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- `registerSync` now reconciles CDC triggers to the registry instead of only
+  adding them: triggers for a collection you've removed from the registry are
+  dropped on the next `registerSync`, so an orphaned table stops firing capture
+  triggers into `_sync_changes`. Trigger reap only — existing change rows are
+  left untouched. (ADR-0008)
 
 ## [0.2.0] — 2026-05-31
 

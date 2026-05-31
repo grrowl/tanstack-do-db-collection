@@ -1,8 +1,8 @@
 # 0008 — Orphaned CDC triggers when a collection is removed (backlog)
 
-**Status:** Proposed — backlog. Records a known limitation of
+**Status:** Accepted — implemented. Records a limitation of
 [ADR-0007](./0007-author-owned-schema-register-sync.md)'s `registerSync` and the
-preferred fix; not yet implemented.
+fix now shipped: Option 1, reaping in `registerSync`.
 
 ## Context
 
@@ -42,13 +42,47 @@ have no consumer. But the change-log growth is unbounded in that state.
    how the orphan arises in the first place.
 3. **Do nothing; document.** Orphan triggers are benign short of the bloat case.
 
-## Decision (deferred)
+## Decision
 
-Prefer **Option 1** — reaping in `registerSync`, gated to the `_sync_*` prefix it
-owns. It keeps the "the author declares the desired set; the framework
-reconciles" model already established for triggers, and needs no new API. Deferred
-until a real need surfaces (someone removes a collection in anger).
+**Option 1** — reconcile in `registerSync`. Trigger install and reap are merged
+into one `ensureTriggers(sql, collections)` (in `changes.ts`): validate +
+install each registered table's triggers, build the expected trigger-name set,
+then `DROP` any `_sync_changes_*` trigger not in it. `registerSync` calls it on
+every wake, so the author declares the desired set and the framework reconciles
+— install the registered set, drop the stale set — with no new API.
 
-When implemented, add a test: register A+B → write both → remove B from the
-registry → `registerSync` → B's triggers are gone and B writes no longer hit
-`_sync_changes`, while A is untouched.
+**Scope: trigger reap only.** Dropping a collection's triggers stops *new*
+orphan rows; the rows already in `_sync_changes` for that table are left as-is.
+After compaction that residue is bounded to ~distinct keys (not the "unbounded"
+the Context warns of, which only holds *while* triggers keep firing) and has no
+consumer, so it is benign. A destructive purge of those rows is deliberately
+**not** done here: under a transiently-reduced registry (misconfig, partial
+rollout) reaping triggers is cheap and self-healing, but purging rows would be
+irreversible. If row reclamation is ever wanted it should be a separate,
+explicitly author-invoked step — not a side effect of reconnecting.
+
+Implementation details that matter:
+
+- **Set-diff, never name-parsing.** Table names may contain `_`, so a trigger
+  name can't be reliably split back into its table. Membership against the
+  expected set sidesteps that entirely.
+- **`GLOB '_sync_changes_*'`, not `LIKE`.** In `LIKE`, `_` is a single-char
+  wildcard; `GLOB` treats it literally, so the scan matches exactly our
+  namespace and can never touch an author's trigger.
+
+This also fixes a sharper case than bloat — a *correctness* bug. `ALTER TABLE …
+RENAME` keeps a table's triggers attached across the rename (same trigger
+**name**, now firing on the renamed table), and our trigger body hardcodes the
+original table name as a string **literal** in the change row. So a rename +
+re-register under an add-only `registerSync` would leave the old-named trigger
+firing alongside the freshly-installed one: every write to the renamed table
+logs **twice**, one row mislabelled with the old table name. Reaping by name
+removes the stale trigger. This SQLite behaviour is pinned by a probe test (it's
+load-bearing for the fix), so it can't silently change under us.
+
+Tests (`tests/ensure-triggers.test.ts`): register A+B → write both → re-register
+A only → B's triggers gone from `sqlite_master` and a B write hits nothing in
+`_sync_changes`, while A still captures; idempotency (re-running reaps nothing);
+namespace safety (an author trigger survives reaping with an empty registry); a
+rename probe pinning the duplicate-trigger hazard, and that one reconcile after a
+rename leaves the renamed table capturing exactly once.

@@ -76,6 +76,41 @@ export function installTriggers(sql: SqlStorage, tbl: string, pk: string): void 
 }
 
 /**
+ * Make the `_sync_changes_*` triggers exactly reflect the registered
+ * collections (ADR-0008): validate + install each registered table's triggers,
+ * then DROP any of OUR triggers whose collection is gone (set-diff against the
+ * expected names). Idempotent — a steady registry installs nothing new and
+ * reaps nothing — so `registerSync` can call it on every wake to reconcile the
+ * whole trigger state. Removing a collection from the registry thus stops its
+ * orphaned table from firing capture triggers into `_sync_changes`.
+ *
+ * Takes a structural `{table, pk}` rather than registry.ts's `CollectionDef` so
+ * changes.ts stays free of any import from registry.ts (which already imports
+ * `SYNC_PREFIX` from here — the reverse would be a cycle).
+ */
+export function ensureTriggers(
+  sql: SqlStorage,
+  collections: Iterable<{ table: string; pk: string }>,
+): void {
+  const want = new Set<string>()
+  for (const { table, pk } of collections) {
+    assertSyncCompatible(sql, table, pk)
+    installTriggers(sql, table, pk)
+    want.add(`_sync_changes_${table}_ai`)
+    want.add(`_sync_changes_${table}_au`)
+    want.add(`_sync_changes_${table}_ad`)
+  }
+  // GLOB, not LIKE: `_` is a LIKE wildcard but a GLOB literal, so this matches
+  // exactly our `_sync_changes_` namespace and never an author trigger.
+  const existing = sql.exec<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB '_sync_changes_*'",
+  )
+  for (const { name } of existing) {
+    if (!want.has(name)) sql.exec(`DROP TRIGGER IF EXISTS "${name}"`)
+  }
+}
+
+/**
  * Validate that an author-created table is sync-compatible (ADR-0007, D9): the
  * declared `pk` must be the table's SOLE primary key and have TEXT affinity (a
  * client-supplied stable key: TEXT/VARCHAR/CHAR/…). Rejects a missing table, a

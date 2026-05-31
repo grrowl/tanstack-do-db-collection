@@ -17,13 +17,12 @@ import type { SqlStorage, SqlStorageValue } from "@cloudflare/workers-types"
 import { createFrameCodec, type FrameCodec } from "../wire/frame-codec.ts"
 import type { ClientFrame, ServerFrame } from "../wire/frames.ts"
 import {
-  assertSyncCompatible,
   compactChanges,
   currentSeq,
+  ensureTriggers,
   getDrainCursor,
   hydrateRows,
   initSchema,
-  installTriggers,
   minChangeSeq,
   readChangesSince,
   setDrainCursor,
@@ -80,16 +79,15 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
 
   /**
    * Wire collections for sync: validate each table is sync-compatible (ADR-0007)
-   * and install its CDC triggers. The author owns table creation; call this
-   * AFTER the tables exist — typically in your constructor's
-   * `blockConcurrencyWhile`, after migrating. Idempotent.
+   * and reconcile its CDC triggers — install the registered set, drop triggers
+   * for any collection no longer registered (ADR-0008). The author owns table
+   * creation; call this AFTER the tables exist — typically in your constructor's
+   * `blockConcurrencyWhile`, after migrating. Idempotent; re-callable to update
+   * the whole trigger state when the registry changes.
    */
   protected registerSync(registry: Registry<TUser, Env>): void {
     initSchema(this.sql)
-    for (const c of registry.collections.values()) {
-      assertSyncCompatible(this.sql, c.table, c.pk)
-      installTriggers(this.sql, c.table, c.pk)
-    }
+    ensureTriggers(this.sql, registry.collections.values())
     this.#registry = registry
   }
 
