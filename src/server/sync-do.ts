@@ -24,6 +24,7 @@ import {
   hydrateRows,
   initSchema,
   minChangeSeq,
+  pruneChanges,
   readChangesSince,
   setDrainCursor,
 } from "./changes.ts"
@@ -57,6 +58,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   /** Compact the change log every this-many drained mutations (not on a timer —
    *  an alarm would wake idle DOs; this rides recent work). */
   protected readonly compactionEvery: number = 200
+  /** Age bound for `_sync_changes` (ADR-0009). Changes older than this are
+   *  pruned during compaction; a reconnect older than the surviving floor gets a
+   *  full re-snapshot instead of a delta. `null` disables retention (the log
+   *  reverts to compaction-only, unbounded by age). Sibling to
+   *  `dedupRetentionMs`. Default 2 days. */
+  protected readonly changelogRetentionMs: number | null = 172_800_000
   /** Dedup retention window (ms), independent of changelog retention (C5). */
   protected readonly dedupRetentionMs: number = 3_600_000
   private writesSinceCompaction = 0
@@ -438,6 +445,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     this.ctx.waitUntil(
       (async (): Promise<void> => {
         compactChanges(this.sql)
+        pruneChanges(this.sql, this.changelogRetentionMs, Date.now())
         sweepDedup(this.sql, this.dedupRetentionMs, Date.now())
       })(),
     )
@@ -477,12 +485,18 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
 
     // Reconnect catch-up: a `since` cursor asks for changes after that point
     // rather than a fresh snapshot. Serve a windowed delta while the change log
-    // still reaches back that far; otherwise fall back to reset + snapshot
-    // (the retention floor; exercised once compaction prunes — M7 next).
+    // still reaches back that far; otherwise fall back to reset + snapshot.
+    //
+    // The floor is `minChangeSeq` — no persisted watermark needed (ADR-0009).
+    // Retention prunes a seq-prefix (ts is monotone in seq), so every pruned
+    // change is below the floor: a client at `since >= floor-1` is missing
+    // nothing, one below it may be, and must reset. An EMPTY log (floor 0) with
+    // a real `since` means history was pruned away (or this is a storage-reset
+    // incarnation) — also a reset, never a silent "up to date".
     const since = frame.since != null ? Number(frame.since) : 0
     if (since > 0) {
       const floor = minChangeSeq(this.sql)
-      if (floor === 0 || since >= floor - 1) {
+      if (floor !== 0 && since >= floor - 1) {
         this.emitCatchUp(ws, sub, coll, since, seq)
         return
       }

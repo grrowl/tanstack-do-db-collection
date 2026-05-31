@@ -189,6 +189,21 @@ export function compactChanges(sql: SqlStorage): void {
   )
 }
 
+/**
+ * Age-based changelog retention (ADR-0009): drop every change older than
+ * `olderThanMs`. Bounds `_sync_changes` by AGE — complementing compaction, which
+ * bounds it by key-cardinality. `ts` is server-stamped and trusted, so we delete
+ * by age directly. Mirrors the time-bound `sweepDedup`.
+ *
+ * `olderThanMs === null` DISABLES retention (no-op) — the log reverts to
+ * compaction-only. A reconnect older than the surviving floor is handled by the
+ * `reset` gate in `handleSub`; this only reclaims storage.
+ */
+export function pruneChanges(sql: SqlStorage, olderThanMs: number | null, nowMs: number): void {
+  if (olderThanMs === null) return
+  sql.exec("DELETE FROM _sync_changes WHERE ts < ?", nowMs - olderThanMs)
+}
+
 /** The "highest seq we've broadcast" watermark. */
 export function getDrainCursor(sql: SqlStorage): number {
   const rows = Array.from(

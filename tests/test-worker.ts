@@ -102,9 +102,19 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
  *  registration fails loud (ADR-0007). */
 export class UnregisteredDO extends SyncDurableObject<unknown, Claims> {}
 
+/** Same collections as SyncTestDO, but with a tiny compaction threshold so the
+ *  opportunistic `maybeCompact` housekeeping (compaction + retention prune +
+ *  dedup sweep) fires after a few writes instead of 200 — lets tests exercise
+ *  the real drain → maybeCompact → waitUntil path. Keeps the default 2-day
+ *  `changelogRetentionMs` so the retention wiring is tested as shipped. */
+export class MaintTestDO extends SyncTestDO {
+  protected override readonly compactionEvery = 3
+}
+
 interface Env {
   TEST_DO: DurableObjectNamespace
   SYNC_DO: DurableObjectNamespace
+  MAINT_DO: DurableObjectNamespace
 }
 
 export default {
@@ -113,6 +123,10 @@ export default {
     if (url.pathname.startsWith("/sync/")) {
       const name = url.pathname.slice("/sync/".length) || "default"
       return env.SYNC_DO.get(env.SYNC_DO.idFromName(name)).fetch(req)
+    }
+    if (url.pathname.startsWith("/maint/")) {
+      const name = url.pathname.slice("/maint/".length) || "default"
+      return env.MAINT_DO.get(env.MAINT_DO.idFromName(name)).fetch(req)
     }
     return new Response("test-worker")
   },

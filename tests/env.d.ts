@@ -5,5 +5,6 @@ declare module "cloudflare:test" {
     TEST_DO: DurableObjectNamespace
     SYNC_DO: DurableObjectNamespace
     UNREG_DO: DurableObjectNamespace
+    MAINT_DO: DurableObjectNamespace
   }
 }

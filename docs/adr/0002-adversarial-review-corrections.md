@@ -1,6 +1,8 @@
 # 0002 — Corrections from adversarial review: ordering, shaping, retention
 
-**Status:** Accepted. Amends [ADR-0001](./0001-sync-architecture.md).
+**Status:** Accepted. Amends [ADR-0001](./0001-sync-architecture.md). C5's
+changelog-retention floor is refined by
+[ADR-0009](./0009-changelog-time-retention.md).
 
 ## Context
 
@@ -167,6 +169,13 @@ client can retry an old `txId`.
    connection whose cursor `< retentionFloor`, force a `reset`. Gate compaction
    and tombstone GC by the minimum active delivered cursor, or explicitly reset
    laggards before advancing the floor past them.
+
+   > **Refined by [ADR-0009](./0009-changelog-time-retention.md).** In the
+   > as-built push architecture the changelog's only historical reader is
+   > reconnect catch-up (live deltas are push-once and self-contained), so a
+   > connected client never re-reads the log. 0009 takes **option (b)** — reset
+   > a laggard when it reconnects below the floor — and drops the per-connection
+   > delivered-cursor tracking (option a) as unnecessary here.
 2. `_sync_seen_tx` dedup retention is **independent** of changelog retention,
    sized to the maximum client retry / outbox window (time-based). Commands with
    side effects store their result by `txId` for idempotent replay.

@@ -22,6 +22,7 @@ export default defineWorkersProject({
             TEST_DO: { className: "TestDO", useSQLite: true },
             SYNC_DO: { className: "SyncTestDO", useSQLite: true },
             UNREG_DO: { className: "UnregisteredDO", useSQLite: true },
+            MAINT_DO: { className: "MaintTestDO", useSQLite: true },
           },
         },
       },

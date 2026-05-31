@@ -8,6 +8,15 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+### Added
+
+- **Changelog time-based retention** (ADR-0009). A new `changelogRetentionMs`
+  knob (default 2 days) prunes `_sync_changes` rows older than the window, so the
+  log is bounded by age, not just key-cardinality. A client reconnecting from
+  beyond the surviving floor now receives a `reset` + full snapshot instead of an
+  incremental delta. Set `changelogRetentionMs: null` to disable retention
+  (compaction-only, the prior behavior).
+
 ### Changed
 
 - `registerSync` now reconciles CDC triggers to the registry instead of only
