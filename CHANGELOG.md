@@ -10,6 +10,12 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Added
 
+- **Typed mutations** (ADR-0010). `SyncRegistry` takes a third generic — a
+  collection-row manifest — so handlers are fully typed without casts:
+  `new SyncRegistry<TUser, Env, { messages: Message }>()` types `pk` (must be a
+  column) and each handler's `op.cols` per op (`insert`→`Message`,
+  `update`→`Partial<Message>`, `delete`→none). Purely type-level; the untyped
+  two-generic form still works (`op.cols` falls back to `unknown`).
 - **Changelog time-based retention** (ADR-0009). A new `changelogRetentionMs`
   knob (default 2 days) prunes `_sync_changes` rows older than the window, so the
   log is bounded by age, not just key-cardinality. A client reconnecting from
@@ -19,6 +25,10 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Changed
 
+- **Renamed `Registry` → `SyncRegistry`.** Breaking, no compat shim. The old
+  name was too generic and clashy; the public surface is uniformly `Sync*`
+  (`SyncDurableObject`, `runSyncedWrite`, `registerSync`). Update your import and
+  `new SyncRegistry(...)`.
 - `registerSync` now reconciles CDC triggers to the registry instead of only
   adding them: triggers for a collection you've removed from the registry are
   dropped on the next `registerSync`, so an orphaned table stops firing capture

@@ -2,7 +2,7 @@
 // miniflare.durableObjects, and routes WebSocket upgrades to the sync DO.
 
 import { DurableObject } from "cloudflare:workers"
-import { Registry } from "../src/server/registry.ts"
+import { SyncRegistry } from "../src/server/registry.ts"
 import { SyncDurableObject } from "../src/server/sync-do.ts"
 
 /** Bare DO for the M1 CDC tests; they drive storage via runInDurableObject. */
@@ -28,7 +28,7 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, body TEXT)`)
       this.sql.exec(`CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT)`)
       this.registerSync(
-        new Registry<Claims>()
+        new SyncRegistry<Claims>()
           .defineCollection({ table: "messages", pk: "id" })
           .defineMutation({
             collection: "messages",

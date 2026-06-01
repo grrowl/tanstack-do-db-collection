@@ -11,7 +11,7 @@
 // `/bump` is a server-side load generator — it mutates random tasks (likely cold
 // ones the caller never loaded) and broadcasts, so the OTHER tab sees move-in.
 
-import { Registry, SyncDurableObject } from "../../../src/server/index.ts"
+import { SyncRegistry, SyncDurableObject } from "../../../src/server/index.ts"
 
 interface Env {
   BOARD_DO: DurableObjectNamespace
@@ -35,7 +35,7 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
         updated_at INTEGER NOT NULL
       )`)
       this.registerSync(
-        new Registry<Claims>()
+        new SyncRegistry<Claims>()
           .defineCollection({ table: "tasks", pk: "id" })
           .defineMutation({
             collection: "tasks",

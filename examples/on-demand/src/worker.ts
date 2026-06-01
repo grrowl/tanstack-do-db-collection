@@ -2,7 +2,7 @@
 // A GET /seed?room=… endpoint inserts fixed rows so subsets have pre-existing
 // data to load (demonstrating loadSubset fetching, not just live inserts).
 
-import { Registry, SyncDurableObject } from "../../../src/server/index.ts"
+import { SyncRegistry, SyncDurableObject } from "../../../src/server/index.ts"
 
 interface Env {
   ITEMS_DO: DurableObjectNamespace
@@ -30,7 +30,7 @@ export class ItemsDO extends SyncDurableObject<Env, Claims> {
         created_at INTEGER NOT NULL
       )`)
       this.registerSync(
-        new Registry<Claims>()
+        new SyncRegistry<Claims>()
           .defineCollection({ table: "items", pk: "id" })
           .defineMutation({
             collection: "items",

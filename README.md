@@ -81,7 +81,7 @@ the milestone sequence.
 ### 1. Define your Durable Object
 
 ```ts
-import { Registry, SyncDurableObject } from "tanstack-do-db-collection"
+import { SyncRegistry, SyncDurableObject } from "tanstack-do-db-collection"
 
 interface Claims { userId: string }
 interface Message { id: string; author: string; content: string; created_at: number }
@@ -102,20 +102,23 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
       )`)
 
       this.registerSync(
-        new Registry<Claims>()
+        // The third generic is the collection manifest: table → row type. It
+        // types `pk` (must be a column) and every handler's `op` — no casts.
+        new SyncRegistry<Claims, Env, { messages: Message }>()
           .defineCollection({ table: "messages", pk: "id" })
           .defineMutation({
             collection: "messages",
             type: "insert",
             // authorize runs BEFORE the tx (async ok); throw to deny.
+            // op.cols is typed Message here — no cast.
             authorize: ({ user, op }) => {
-              if ((op.cols as Message).author !== user.userId) {
+              if (op.cols.author !== user.userId) {
                 throw new Error("author mismatch")
               }
             },
             // execute runs INSIDE transactionSync — synchronous only.
             execute: ({ op, sql }) => {
-              const m = op.cols as Message
+              const m = op.cols // Message
               sql.exec(
                 "INSERT INTO messages(id, author, content, created_at) VALUES (?, ?, ?, ?)",
                 m.id, m.author, m.content, m.created_at,
@@ -124,7 +127,7 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
             // afterCommit (optional): fire-and-forget AFTER the commit + receipt —
             // the home for external side effects execute can't do (delete an R2
             // object, enqueue a job). Receives `env`; owns its own idempotency.
-            // afterCommit: async ({ op, env }) => { await env.BUCKET.delete(op.key as string) },
+            // afterCommit: async ({ op, env }) => { await env.BUCKET.delete(op.key) },
           }),
       )
     })

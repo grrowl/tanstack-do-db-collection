@@ -30,16 +30,16 @@ import {
 } from "./changes.ts"
 import { Broadcaster } from "./broadcast.ts"
 import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx, sweepDedup } from "./dedup.ts"
-import type { Registry } from "./registry.ts"
+import type { SyncRegistry } from "./registry.ts"
 import { andPredicates, compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
 import { SubscriptionRegistry } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
   /** Set by `registerSync` — the collections/mutations/commands this DO serves. */
-  #registry: Registry<TUser, Env> | undefined
+  #registry: SyncRegistry<TUser, Env> | undefined
 
   /** The registered registry. Throws if `registerSync` hasn't run yet (ADR-0007). */
-  protected get registry(): Registry<TUser, Env> {
+  protected get registry(): SyncRegistry<TUser, Env> {
     if (!this.#registry) {
       throw new Error(
         "sync not registered — call this.registerSync(registry) in your constructor's " +
@@ -92,7 +92,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
    * `blockConcurrencyWhile`, after migrating. Idempotent; re-callable to update
    * the whole trigger state when the registry changes.
    */
-  protected registerSync(registry: Registry<TUser, Env>): void {
+  protected registerSync(registry: SyncRegistry<TUser, Env>): void {
     initSchema(this.sql)
     ensureTriggers(this.sql, registry.collections.values())
     this.#registry = registry

@@ -4,7 +4,7 @@
 // the real code with no build step for the lib. A published consumer would
 // instead `import { ... } from "tanstack-do-db-collection"`.
 
-import { Registry, SyncDurableObject } from "../../../src/server/index.ts"
+import { SyncRegistry, SyncDurableObject } from "../../../src/server/index.ts"
 
 interface Env {
   SESSION_DO: DurableObjectNamespace
@@ -27,7 +27,7 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
         created_at INTEGER NOT NULL
       )`)
       this.registerSync(
-        new Registry<Claims>()
+        new SyncRegistry<Claims>()
           .defineCollection({ table: "messages", pk: "id" })
           .defineMutation({
             collection: "messages",

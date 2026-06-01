@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { Registry } from "../src/server/registry.ts"
+import { SyncRegistry } from "../src/server/registry.ts"
 
 // WHY: `{table, pk}` are interpolated raw into trigger DDL and SELECTs, so
 // defineCollection rejects unsafe identifiers, the reserved `_sync_` prefix, and
@@ -8,9 +8,9 @@ import { Registry } from "../src/server/registry.ts"
 // registerSync -> assertSyncCompatible (see assert-sync-compatible.test.ts),
 // since the author owns the schema (ADR-0007).
 
-const define = (def: { table: string; pk: string }) => () => new Registry().defineCollection(def)
+const define = (def: { table: string; pk: string }) => () => new SyncRegistry().defineCollection(def)
 
-describe("Registry.defineCollection — identifier + registration guards", () => {
+describe("SyncRegistry.defineCollection — identifier + registration guards", () => {
   it("accepts a valid { table, pk }", () => {
     expect(define({ table: "messages", pk: "id" })).not.toThrow()
   })
@@ -28,7 +28,7 @@ describe("Registry.defineCollection — identifier + registration guards", () =>
   })
 
   it("rejects defining the same collection twice", () => {
-    const r = new Registry().defineCollection({ table: "m", pk: "id" })
+    const r = new SyncRegistry().defineCollection({ table: "m", pk: "id" })
     expect(() => r.defineCollection({ table: "m", pk: "id" })).toThrow(/already defined/)
   })
 })

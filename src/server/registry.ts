@@ -17,13 +17,30 @@ export interface CollectionDef {
   pk: string
 }
 
+/**
+ * Per-op shape of `op` seen by a mutation handler (ADR-0010), discriminated by
+ * `type`: an insert carries the full row, an update a top-level partial patch
+ * (ADR-0002 C6), a delete only the key. `Row` is the collection's row type from
+ * the `SyncRegistry` manifest (`unknown` when the collection is untyped).
+ */
+export type OpFor<T extends RowOp, Row> = T extends "insert"
+  ? { type: "insert"; key: string; cols: Row }
+  : T extends "update"
+    ? { type: "update"; key: string; cols: Partial<Row> }
+    : { type: "delete"; key: string; cols?: undefined }
+
+/** The pk must be an actual column when the row type is known; any string for an
+ *  untyped collection (`keyof unknown` is `never`). */
+type PkOf<Row> = [keyof Row] extends [never] ? string : keyof Row & string
+
 /** Context for a mutation handler. `env` is the DO's binding env, so handlers
  *  can reach external resources (R2/KV/services) — essential for `afterCommit`
  *  side effects and useful in `authorize`. `execute` runs inside
- *  `transactionSync`, so it cannot await env, but may read synchronous config. */
-export interface MutationCtx<TUser, Env = unknown> {
+ *  `transactionSync`, so it cannot await env, but may read synchronous config.
+ *  `TOp` is the typed `op` (defaults to the erased wire `MutOp`). */
+export interface MutationCtx<TUser, Env = unknown, TOp = MutOp> {
   user: TUser
-  op: MutOp
+  op: TOp
   sql: SqlStorage
   env: Env
 }
@@ -68,13 +85,41 @@ export interface CommandDef<TUser, Env = unknown> {
   execute: (ctx: CommandCtx<TUser, Env>) => unknown | Promise<unknown>
 }
 
-export class Registry<TUser = unknown, Env = unknown> {
+/**
+ * The author-facing mutation definition: like `MutationDef`, but its handlers
+ * receive a `Row`- and op-typed `op` (ADR-0010). `SyncRegistry` accepts this and
+ * stores it as the erased `MutationDef` — dispatch is untyped, so the erasure is
+ * sound (the wire delivers exactly this shape at runtime).
+ */
+type MutationInput<TUser, Env, Name extends string, T extends RowOp, Row> = {
+  collection: Name
+  type: T
+  authorize?: (ctx: MutationCtx<TUser, Env, OpFor<T, Row>>) => void | Promise<void>
+  execute: (ctx: MutationCtx<TUser, Env, OpFor<T, Row>>) => void
+  afterCommit?: (ctx: MutationCtx<TUser, Env, OpFor<T, Row>>) => unknown | Promise<unknown>
+}
+
+/**
+ * `TCols` is the collection-row manifest (table name → row type), declared once
+ * at construction (ADR-0010): `new SyncRegistry<TUser, Env, { messages: Message }>()`.
+ * It types both `defineCollection` (pk ∈ keyof Row) and `defineMutation`
+ * (op.cols per row + op). Defaults to `Record<string, unknown>`, so an untyped
+ * `new SyncRegistry<TUser>()` still compiles (handlers cast, as before).
+ */
+export class SyncRegistry<
+  TUser = unknown,
+  Env = unknown,
+  TCols extends Record<string, unknown> = Record<string, unknown>,
+> {
   readonly collections = new Map<string, CollectionDef>()
   /** Keyed by `${collection}:${type}`. */
   readonly mutations = new Map<string, MutationDef<TUser, Env>>()
   readonly commands = new Map<string, CommandDef<TUser, Env>>()
 
-  defineCollection(def: CollectionDef): this {
+  defineCollection<Name extends keyof TCols & string>(def: {
+    table: Name
+    pk: PkOf<NonNullable<TCols[Name]>>
+  }): this {
     assertValidCollection(def)
     if (this.collections.has(def.table)) {
       throw new Error(`collection '${def.table}' is already defined`)
@@ -83,13 +128,17 @@ export class Registry<TUser = unknown, Env = unknown> {
     return this
   }
 
-  defineMutation(def: MutationDef<TUser, Env>): this {
+  defineMutation<Name extends keyof TCols & string, T extends RowOp>(
+    def: MutationInput<TUser, Env, Name, T, NonNullable<TCols[Name]>>,
+  ): this {
     if (!this.collections.has(def.collection)) {
       throw new Error(`defineMutation: unknown collection '${def.collection}' — define the collection first`)
     }
     const key = `${def.collection}:${def.type}`
     if (this.mutations.has(key)) throw new Error(`mutation '${key}' is already defined`)
-    this.mutations.set(key, def)
+    // Erase to the stored, untyped def: runtime dispatch passes a wire `MutOp`,
+    // which is exactly the shape the typed handler expects (ADR-0010).
+    this.mutations.set(key, def as unknown as MutationDef<TUser, Env>)
     return this
   }
 

@@ -52,7 +52,7 @@ export function initSchema(sql: SqlStorage): void {
 /**
  * Install AFTER INSERT/UPDATE/DELETE triggers copying change events into
  * `_sync_changes`. Idempotent. `tbl`/`pk` MUST be validated identifiers
- * (the Registry enforces this) — they are interpolated into DDL.
+ * (the SyncRegistry enforces this) — they are interpolated into DDL.
  *
  * Each statement is passed whole: splitting on `;` would sever the inner
  * `INSERT ...;` from its `END`.
@@ -235,7 +235,7 @@ export function snapshotAll(sql: SqlStorage, tbl: string): Array<Record<string, 
 }
 
 /** Current rows for a set of keys, for hydrating deltas. `tbl`/`pk` are
- *  validated identifiers (the Registry enforces this). */
+ *  validated identifiers (the SyncRegistry enforces this). */
 export function hydrateRows(
   sql: SqlStorage,
   tbl: string,

@@ -4,14 +4,15 @@
 // diffs. Imports the workerd runtime (`cloudflare:workers`); not for browsers.
 //
 //   - SyncDurableObject: hibernating-WebSocket base class.
-//   - Registry: defineCollection / defineMutation / defineCommand.
+//   - SyncRegistry: defineCollection / defineMutation / defineCommand.
 
-export { Registry } from "./registry.ts"
+export { SyncRegistry } from "./registry.ts"
 export type {
   CollectionDef,
   CommandCtx,
   CommandDef,
   MutationCtx,
+  OpFor,
   MutationDef,
 } from "./registry.ts"
 export { SyncDurableObject } from "./sync-do.ts"
