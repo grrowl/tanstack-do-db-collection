@@ -6,34 +6,36 @@
 > catch-up, with a **single ordered stream** carrying both data and write
 > confirmation.
 
-> **Status: v1 feature-complete, pre-1.0.** The core is built and tested
-> end-to-end (CDC + single-stream confirmation, optimistic mutations, filtered
-> subscriptions, subset shaping, reconnect catch-up, compaction, multiplexing,
-> client IVM). The API may still shift before 1.0. Built in the open — see
-> [`docs/adr/`](./docs/adr/) for the decisions and `git log` for the path.
-> On-demand subsets ship (`syncMode: 'on-demand'` — load only the subsets your
-> queries request). Deferred post-v1: windowed pagination
-> (`orderBy`/`limit`/cursor with server-side window maintenance).
+The Durable Object owns the data, the browser runs a TanStack DB collection
+against it, and this library moves the diffs — nothing more — over a single
+ordered stream.
 
-The Durable Object owns the data. The browser runs a TanStack DB collection
-against it. This library moves the diffs — and nothing more than the diffs.
-
-It is, in spirit, [ElectricSQL](https://electric-sql.com)'s sync model ported
-to a Durable Object: one ordered log, consumed from a single cursor. The
-difference is that a DO is a **single authoritative writer**, so the log is
-totally ordered and contiguous — which makes the model *simpler* here than it
-is over Postgres, and lets the same library own the **write** path too.
+It's a deliberately plain topology, each part doing what it does best. One
+authoritative writer keeps the change log totally ordered and contiguous, so a
+single cursor drives live deltas, reconnect catch-up, and write confirmation
+alike — no second ack channel, no CRDT to merge, no Postgres to mirror. The
+Durable Object holds authoritative state and assigns order; TanStack DB gives
+the client its reactive layer (live queries, IVM, optimistic rollback); this
+library carries the diffs between. You stop trading one good thing for another
+— optimistic CRUD *and* a single source of truth, a simple transport *and* a
+fully reactive client, at once.
 
 ---
 
 ## Why this exists
 
-If you reach for sync on Cloudflare today you either (a) adopt a
-Postgres-backed engine and give up DO sovereignty, or (b) hand-roll
-per-table broadcast plumbing and reinvent the hard client-side reactive
-layer. This library takes the third path: the DO is the source of truth, and
-the entire client-side reactive layer (live queries, incremental view
-maintenance, optimistic rollback) comes from TanStack DB for free.
+If you reach for sync on Cloudflare today, the good options each ask you to
+give something up. CRDT engines — Cloudflare's own
+[PartyKit](https://github.com/cloudflare/partykit) — are superb for
+collaborative editing, but they're [Yjs](https://github.com/yjs/yjs)-shaped
+(merge semantics, document baggage) with a thin authorization story. We were
+reaching for live-CRUD engines like [Zero](https://zero.rocicorp.dev/) and
+[LiveStore](https://dev.docs.livestore.dev/) — excellent for traditional web
+apps — but the technical requirements get steep for globally-distributed apps:
+a separate store to mirror into and operate alongside every DO. So this library
+takes the third path — the DO is the source of truth, and the entire
+client-side reactive layer (live queries, incremental view maintenance,
+optimistic rollback) comes from TanStack DB for free.
 
 | | This library |
 |---|---|
@@ -59,11 +61,14 @@ maintenance, optimistic rollback) comes from TanStack DB for free.
   write is confirmed when that position passes the sequence the DO assigned
   the write — exactly Electric's `awaitTxId`, reduced to a `>=` comparison
   because a single writer produces a contiguous log.
-- **Client-supplied keys.** Primary keys are client-chosen (ULID / UUIDv7).
-  The optimistic row id must equal the confirmed row id.
-- **Compaction-defined retention.** The change log compacts to latest-op-per-
-  key beyond a horizon; clients reconnecting from before the horizon get a
-  fresh snapshot. Bounded storage, no event-log explosion.
+- **Client-supplied keys.** The client mints the primary key (ULID / UUIDv7),
+  so the optimistic row and the confirmed row are *the same row* — the write
+  applies locally under the chosen id and the server confirms that same id, with
+  no key reconciliation or id swap on commit.
+- **Bounded retention.** The change log stays light: compaction keeps only the
+  latest op per key, and changes are swept after a retention window (2 days by
+  default, configurable). A client reconnecting from beyond that window gets a
+  fresh snapshot instead of a delta. Bounded storage, no event-log explosion.
 
 See [ADR-0001](./docs/adr/0001-sync-architecture.md) for the full rationale,
 and [the build plan](./docs/adr/0001-sync-architecture.md#build-sequence) for
@@ -79,35 +84,46 @@ the milestone sequence.
 import { Registry, SyncDurableObject } from "tanstack-do-db-collection"
 
 interface Claims { userId: string }
+interface Message { id: string; author: string; content: string; created_at: number }
 
 export class SessionDO extends SyncDurableObject<Env, Claims> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
+
     // You own your schema — migrate with anything (raw DDL, Drizzle, …), then
     // call registerSync to wire CDC. blockConcurrencyWhile runs it before the
-    // first request. See ADR-0007.
+    // first request.
     ctx.blockConcurrencyWhile(async () => {
       this.sql.exec(`CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY, author TEXT NOT NULL,
-        content TEXT NOT NULL, created_at INTEGER NOT NULL)`)
+        id         TEXT PRIMARY KEY,        -- client-supplied TEXT key (ULID/UUIDv7)
+        author     TEXT NOT NULL,
+        content    TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`)
+
       this.registerSync(
         new Registry<Claims>()
-          .defineCollection({ table: "messages", pk: "id" }) // pk must be a client-supplied TEXT key
+          .defineCollection({ table: "messages", pk: "id" })
           .defineMutation({
             collection: "messages",
             type: "insert",
             // authorize runs BEFORE the tx (async ok); throw to deny.
             authorize: ({ user, op }) => {
-              if ((op.cols as { author: string }).author !== user.userId) throw new Error("author mismatch")
+              if ((op.cols as Message).author !== user.userId) {
+                throw new Error("author mismatch")
+              }
             },
             // execute runs INSIDE transactionSync — synchronous only.
             execute: ({ op, sql }) => {
-              const c = op.cols as { id: string; author: string; content: string; created_at: number }
-              sql.exec("INSERT INTO messages(id,author,content,created_at) VALUES(?,?,?,?)", c.id, c.author, c.content, c.created_at)
+              const m = op.cols as Message
+              sql.exec(
+                "INSERT INTO messages(id, author, content, created_at) VALUES (?, ?, ?, ?)",
+                m.id, m.author, m.content, m.created_at,
+              )
             },
-            // afterCommit (optional) runs fire-and-forget AFTER the commit + receipt —
-            // the home for external side effects execute can't do (delete an R2 object,
-            // enqueue a job). Receives `env`; isolated and owns its own idempotency. See ADR-0004.
+            // afterCommit (optional): fire-and-forget AFTER the commit + receipt —
+            // the home for external side effects execute can't do (delete an R2
+            // object, enqueue a job). Receives `env`; owns its own idempotency.
             // afterCommit: async ({ op, env }) => { await env.BUCKET.delete(op.key as string) },
           }),
       )
@@ -121,6 +137,7 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
 }
 ```
 
+> [!IMPORTANT]
 > **Schema & migrations.** You own the table — create it with anything (raw
 > `CREATE TABLE`, Drizzle, a versioned migrator), then call `registerSync` to
 > wire CDC. The pk must have **TEXT affinity** (`TEXT`, `VARCHAR`, `CHAR`, …) so
@@ -130,21 +147,32 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
 > flows to clients with no re-wiring, and re-running `registerSync` on the next
 > deploy is idempotent (ADR-0007).
 
+> [!NOTE]
 > Server-side writes outside the client flow — an agent inserting a row, a
 > webhook, a cron job, a bulk seed — go through `this.runSyncedWrite(sql => …)`:
 > it applies your write and broadcasts it to connected clients (ADR-0006).
 
 ### 2. Route the upgrade from your Worker (the trust boundary)
 
+This Worker fronts every `/sync/<sessionId>` WebSocket upgrade: match the path,
+authenticate, then forge the claims header and hand off to the right DO.
+
 ```ts
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    // Only handle /sync/<sessionId> — the sessionId is the DO shard key.
+    const match = new URL(req.url).pathname.match(/^\/sync\/(.+)$/)
+    if (!match) return new Response("not found", { status: 404 })
+    const sessionId = match[1]
+
+    // The trust boundary: authenticate here, then stamp claims the DO can trust.
     const claims = await verifyToken(req) // your auth
     if (!claims) return new Response("unauthorized", { status: 401 })
-    const h = new Headers(req.headers)
-    h.set("x-claims", JSON.stringify(claims)) // .set() overwrites any client-injected value
-    const id = env.SESSION_DO.idFromName(sessionIdFrom(req))
-    return env.SESSION_DO.get(id).fetch(new Request(req, { headers: h }))
+    const headers = new Headers(req.headers)
+    headers.set("x-claims", JSON.stringify(claims)) // .set() overwrites any client-injected value
+
+    const id = env.SESSION_DO.idFromName(sessionId)
+    return env.SESSION_DO.get(id).fetch(new Request(req, { headers }))
   },
 } satisfies ExportedHandler<Env>
 ```
@@ -193,6 +221,7 @@ browser-verified.
   (move-in). Its firehose makes the deferred bounded-window-under-churn
   limitation visible — `loaded` climbs past `window`.
 
+> [!TIP]
 > Using on-demand with `orderBy` + `limit`? Add a **range index** on the order
 > column (`collection.createIndex((r) => r.field, { indexType: BTreeIndex })`) —
 > without it the window can't page lazily and falls back to loading the whole

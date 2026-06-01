@@ -23,7 +23,7 @@ The design is grounded in a close reading of three bodies of prior art:
   overlay with reconcile-by-key, predicate IR + evaluator, and `db-ivm`
   differential dataflow are the entire client-side reactive layer. We build a
   collection adapter against this contract and run none of it on the server.
-- **A prior bespoke spike** (`@brainwaves/sync-do`) — proved the good
+- **A prior bespoke spike** — proved the good
   primitives (CDC via SQLite triggers into one change table; hibernating
   WebSockets; client-supplied keys; an egress coalescer) but accreted
   *accidental complexity*: it split write confirmation across two channels
