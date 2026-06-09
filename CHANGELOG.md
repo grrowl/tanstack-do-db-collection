@@ -8,6 +8,10 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.0] — 2026-06-09
+
 ### Added
 
 - **Typed mutations** (ADR-0010). `SyncRegistry` takes a third generic — a
