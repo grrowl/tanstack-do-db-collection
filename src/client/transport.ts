@@ -45,6 +45,28 @@ export class MutationRejectedError extends Error {
   }
 }
 
+/** The transport surface `doCollectionOptions` consumes — structural, so the
+ *  WebSocket transport and the SSR snapshot transport are interchangeable
+ *  (ADR-0011 D2). */
+export interface Transport {
+  connect(): Promise<void>
+  subscribe(
+    subId: string,
+    collection: string,
+    handler: SubHandler,
+    where?: unknown,
+    orderBy?: unknown,
+    limit?: number,
+    since?: string,
+  ): Promise<void>
+  unsubscribe(subId: string): void
+  sendMut(frame: Extract<ClientFrame, { t: "mut" }>): Promise<{ result?: unknown }>
+  fetch(frame: Extract<ClientFrame, { t: "fetch" }>): Promise<Array<unknown>>
+  close(): void
+  readonly appliedCursor: string
+  seedCursor(cursor: string): void
+}
+
 export interface TransportOptions {
   url: string
   /** Returns a CONNECTED socket. Default opens `new WebSocket(url)` and resolves
@@ -112,6 +134,29 @@ export class WebSocketTransport {
   /** Highest committed position the client has applied (stringified bigint). */
   get appliedCursor(): string {
     return String(this.appliedSeq)
+  }
+
+  /**
+   * Claim a cursor position on behalf of externally-applied state — SSR
+   * hydration (ADR-0011 D3). The hydrated rows ARE the stream's prefix up to
+   * the dehydrated cursor, so claiming it keeps a bootstrap-window reconnect
+   * from re-snapshotting over them (a fresh snapshot carries no tombstones, so
+   * a row deleted server-side meanwhile would never be removed).
+   *
+   * The claim only ever SHRINKS relative to live progress: claiming a shorter
+   * applied prefix is always safe; claiming a longer one without data never
+   * is. A seed below the current position (a late streamed chunk — upstream
+   * has already applied its possibly-stale rows; there is no veto) regresses
+   * the cursor and resubscribes, so the catch-up replay re-freshens exactly
+   * the clobbered window. Replay is idempotent: latest-op-per-key, applied as
+   * upserts/deletes.
+   */
+  seedCursor(cursor: string): void {
+    const c = BigInt(cursor) // malformed cursor throws — fail loud, never guess
+    if (c <= 0n) return // "0" honestly means: no resume point to claim
+    if (c >= this.appliedSeq && this.appliedSeq !== 0n) return // never grow the claim
+    this.appliedSeq = c
+    if (this.ws && this.handlers.size > 0) this.resubscribeAll()
   }
 
   async connect(): Promise<void> {
@@ -206,10 +251,13 @@ export class WebSocketTransport {
     where?: unknown,
     orderBy?: unknown,
     limit?: number,
+    /** Resume point for the FIRST sub — SSR hydration's dehydrated cursor
+     *  (ADR-0011 D3). One-shot: reconnects resume from `appliedCursor`. */
+    since?: string,
   ): Promise<void> {
     this.handlers.set(subId, { handler, collection, where, orderBy, limit })
     await this.connect()
-    this.sendFrame({ t: "sub", subId, collection, where, orderBy, limit })
+    this.sendFrame({ t: "sub", subId, collection, where, orderBy, limit, since })
   }
 
   unsubscribe(subId: string): void {
