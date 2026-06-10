@@ -21,6 +21,7 @@ import {
   currentSeq,
   ensureTriggers,
   getDrainCursor,
+  highWaterSeq,
   hydrateRows,
   initSchema,
   minChangeSeq,
@@ -105,6 +106,34 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
    */
   protected parseAttachment(_req: Request): TUser | Promise<TUser> {
     return undefined as TUser
+  }
+
+  /**
+   * One consistent snapshot of a collection plus a durable resume cursor,
+   * WITHOUT a WebSocket — the SSR read path (ADR-0011 D1). Synchronous SQLite,
+   * so rows and cursor are at one position. Callable over the binding as RPC
+   * by any first-party worker — the binding is the trust boundary, exactly as
+   * the Worker-forged-claims model is for the WS upgrade; end users never
+   * reach this. Throws on an unknown collection or an un-lowerable predicate
+   * (fail loud; RPC propagates the error to the caller).
+   *
+   * The cursor is the durable high-water mark, not bare `currentSeq` — see
+   * `highWaterSeq`. A cursor of "0" honestly means "no resume point" and the
+   * client must reconcile a fresh snapshot instead of catching up.
+   */
+  readSnapshot(req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number }): {
+    rows: Array<Record<string, SqlStorageValue>>
+    cursor: string
+  } {
+    const coll = this.registry.collections.get(req.collection)
+    if (!coll) throw new Error(`readSnapshot: unknown collection '${req.collection}'`)
+    const query = compileSubsetQuery(req.collection, {
+      where: req.where,
+      orderBy: req.orderBy,
+      limit: req.limit,
+    })
+    const rows = Array.from(this.sql.exec(query.sql, ...query.params)) as Array<Record<string, SqlStorageValue>>
+    return { rows, cursor: String(highWaterSeq(this.sql)) }
   }
 
   override async fetch(req: Request): Promise<Response> {
