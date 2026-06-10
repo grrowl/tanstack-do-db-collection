@@ -165,6 +165,26 @@ describe("syncMeta hooks", () => {
     expect(() => o.sync.importSyncMeta(null)).toThrow(/unrecognized sync meta/)
   })
 
+  it("unrecognized meta fails loud BUT safe: the rows already landed, so sync still reconciles", async () => {
+    // Upstream applies the chunk's rows BEFORE importSyncMeta — a throw can't
+    // veto them. If the throw also skipped our bookkeeping, sync would start
+    // down the non-hydrated path and a server-deleted hydrated row would be
+    // stale forever. The throw must leave the safe state behind: no resume
+    // point ("0") → snapshot + reconcile.
+    const calls: Array<string> = []
+    const o = doCollectionOptions<Msg>({
+      transport: spyTransport(calls),
+      table: "messages",
+      getKey: (r) => r.id,
+    }) as unknown as Hooked
+    expect(() => o.sync.importSyncMeta({ v: 99, cursor: "5" })).toThrow(/unrecognized sync meta/)
+    expect(calls).not.toContain("seed") // a cursor we can't read is never claimed
+    o.sync.sync({ ...controls, markReady: () => {} })
+    await flush()
+    // Snapshot path (no since) — where the always-armed eager reconcile lives.
+    expect(calls.some((c) => c.startsWith("sub:") && c.endsWith("since=none"))).toBe(true)
+  })
+
   it("merge takes the EARLIER cursor — replay is idempotent, skipping is not", () => {
     const o = makeOpts()
     const merged = o.sync.mergeSyncMeta({ v: 1, cursor: "90" }, { v: 1, cursor: "100" })

@@ -188,6 +188,29 @@ describe("SSR round trip: dehydrate on the worker, hydrate + converge in the bro
     ws.close()
   })
 
+  it("a FUTURE-VERSIONED syncMeta throws from hydrate, yet the collection still converges", async () => {
+    const room = `rt-vskew-${crypto.randomUUID()}`
+    await sql(room, "INSERT INTO messages(id,body) VALUES('a','hi'),('b','doomed')")
+
+    const state = await serverRender(room)
+    // A newer serializer wrote meta this client can't read.
+    ;(state.collections[0]! as { syncMeta: unknown }).syncMeta = { v: 99, cursor: "999" }
+    await sql(room, "DELETE FROM messages WHERE id='b'") // dies while in flight
+
+    const ws = makeWsTransport(room)
+    const db = new DbClient()
+    const col = db.collection(makeOptions(ws)) as unknown as {
+      preload: () => Promise<void>
+      get: (k: string) => Msg | undefined
+    }
+    expect(() => db.hydrate(state as never)).toThrow(/unrecognized sync meta/) // loud...
+    await col.preload()
+    expect(col.get("b")).toBeDefined() // rows landed regardless (no upstream veto)
+    await waitFor(() => col.get("b") === undefined) // ...but SAFE: reconcile converges
+    expect(col.get("a")).toMatchObject({ body: "hi" })
+    ws.close()
+  })
+
   it("a CHANGED eager where between render and hydrate downgrades to snapshot reconcile", async () => {
     const room = `rt-where-${crypto.randomUUID()}`
     await sql(room, "INSERT INTO messages(id,body) VALUES('a','keep'),('b','other')")

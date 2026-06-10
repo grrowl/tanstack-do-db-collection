@@ -84,8 +84,18 @@ closing over the request's claims; no Cloudflare
 types in the client build). `subscribe` performs one read and synthesizes
 `onSnap*`/`onSnapEnd`; `connect()` resolves immediately (so on-demand
 `loadSubset` during a server `preload()` works unchanged); its cursor is the
-**min** across reads (the safe joint resume point — replay is idempotent);
-`sendMut`/`sendCall`/`fetch` throw `SsrReadOnlyError`. SSR is read-only.
+**min** across reads; `sendMut`/`sendCall`/`fetch` throw `SsrReadOnlyError`.
+SSR is read-only.
+
+Min is not merely the *safe* joint resume point (replay is idempotent;
+skipping is not) — it is *self-consistent-making*: a render's reads land at
+slightly different positions (milliseconds of DO time apart), and the first
+catch-up from min replays exactly that skew window, converging every
+dehydrated row to one position. Because the changelog `seq` is one stream
+across all collections on the DO, the min is also a coherent position for
+every collection sharing the transport — no per-collection reset risk.
+Per-table cursor tracking (`cursorFor(table)`) was considered and rejected:
+permanent interface surface to avoid a transient milliseconds-wide replay.
 
 ### D3 — syncMeta carries the cursor; the first sub carries `since`
 
@@ -120,7 +130,19 @@ would resume over an empty store and silently lose data):
 - **Eager**: the first sub carries `since`; `markReady()` immediately (rows are
   present; catch-up arrives as `d`+`uptodate`, which never fires `snap-end`).
   Below the retention floor the server answers `reset` → truncate + fresh
-  snapshot: an explicit stale-while-revalidate choice, documented.
+  snapshot — which DOES flash empty between the truncate's commit and the
+  snapshot's (unlike the cursor-`"0"` reconcile path). Accepted, not fixed:
+  the dehydrated cursor is seconds old, so falling below the floor requires
+  `changelogRetentionMs` (default 2 days) shorter than the HTML's flight time
+  — pathological config, not a reachable state. Unifying it would need the
+  client to skip the truncate and let snapshot set-semantics reconcile, but a
+  `reset` is also the only terminal for a REJECTED sub (no snapshot follows),
+  where skipping the truncate keeps stale rows forever — the one outcome
+  ranked worst throughout this design. The reset-cause ambiguity is harmless
+  today (rejection is dev-loud; below-floor is pathological) and becomes
+  worth a wire-level distinction — likely alongside the incarnation epoch —
+  when client-side persistence (an LRU'd local db) makes days-old cursors
+  routine. Future scope, deliberately not now.
 - **On-demand**: **one transient unfiltered catch-up sub**
   (`since = hydratedCursor`, no `where`) that unsubscribes at *its own*
   sub-scoped terminal — never at a broadcast boundary, which can precede its
@@ -162,16 +184,29 @@ value and then dropping the socket loses that write forever. Instead:
   rows that changed since dehydration. (`loadMore`'s page path keeps its
   insert-if-absent: `page` frames never advance the cursor, and a page *can*
   be staler than a held row.)
-- **Key-reconcile for the hydrated-eager fresh-snapshot path**: when a
-  snapshot arrives over hydrated rows (cursor `"0"`, i.e. no resume point, or
-  a refused foreign-filter cursor), collect the snapshot's keys and at
-  `snap-end` delete held *synced* keys absent from it. The honest set
-  semantics of a snapshot, without a truncate's flash-to-empty (SSR exists
-  for first paint). The seen-set is initialized **eagerly** when armed: an
-  EMPTY snapshot (the server wiped the table) must still reconcile everything
-  away (second-review blocker — a lazily-created set silently skipped it).
-  Presence checks steer by `syncedData`, never the combined view — optimistic
-  overlays are invisible to sync writes by design.
+- **Key-reconcile is ALWAYS armed for eager subs** (grill-session
+  generalization; never for on-demand subset subs, whose snapshot must not
+  delete other subsets' rows): an eager snapshot is authoritative set
+  semantics over synced rows, period — at `snap-end`, held synced keys
+  absent from the snapshot are deleted. For the normal empty-at-first-
+  snapshot flow it is a no-op (and boundary-free: `begin` opens only when a
+  delete is due); for ANY path where synced rows precede a snapshot —
+  hydration with no resume point, a refused foreign-filter cursor, meta that
+  failed validation — it is what prevents a server-deleted held row from
+  being stale forever. An EMPTY snapshot still reconciles (zero keys is an
+  authoritative set — second-review blocker). Honest set semantics without a
+  truncate's flash-to-empty (SSR exists for first paint). Presence checks
+  steer by `syncedData`, never the combined view — optimistic overlays are
+  invisible to sync writes by design.
+- **The syncMeta hooks fail loud but SAFE** (grill-session finding): upstream
+  applies a chunk's rows BEFORE `mergeSyncMeta`/`importSyncMeta` run — a
+  validation throw cannot veto them, so throwing alone would leave applied
+  rows with no reconcile intent (and, on-demand, no truncate): stale
+  forever. Both hooks set `hydratedCursor = "0"` (the always-sound
+  snapshot-reconcile / truncate route) BEFORE throwing — the version skew
+  still surfaces to the app, and the state left behind converges. This is
+  also the gradual-upgrade path: a future `v: 2` payload degrades old
+  clients safely and loudly; no per-version fallback logic.
 - **`onDelta` maps `insert` → `update` when the key exists** — catch-up emits
   the latest CDC op per key, so a delete-then-reinsert since the cursor arrives
   as `insert` against a held key and would throw. Pre-existing on reconnect

@@ -160,21 +160,21 @@ export function doCollectionOptions<T extends object>(
     }
 
     const makeHandler = (onReady: () => void, opts?: { reconcileSnapshots?: boolean }): SubHandler => {
-      // `reconcileSnapshots` is armed only for a hydrated collection (ADR-0011
-      // D4): a fresh snapshot can then arrive OVER held synced rows (cursor
-      // "0" = no resume point), and a snapshot is authoritative SET semantics
-      // — held keys absent from it were deleted server-side, and snapshots
-      // carry no tombstones. Track the snapshot's keys and delete the rest at
-      // the boundary; no truncate, so the first paint never flashes empty.
-      // Initialized EAGERLY when armed: an EMPTY snapshot (zero snap frames,
-      // the server wiped the table) must still reconcile everything away at
-      // snap-end — a lazily-created set would silently skip it.
-      let snapKeys: Set<string> | null = opts?.reconcileSnapshots ? new Set() : null
+      // `reconcileSnapshots` (armed for every EAGER sub, never for on-demand
+      // subset subs — a subset snapshot must not delete other subsets' rows):
+      // a snapshot is authoritative SET semantics over the synced rows —
+      // held keys absent from it were deleted server-side, and snapshots
+      // carry no tombstones (ADR-0011 D4). Track each snapshot's keys and
+      // delete the rest at ITS boundary; no truncate, so a hydrated first
+      // paint never flashes empty. The set is per-snapshot (reset at every
+      // snap-end), and an EMPTY snapshot (zero snap frames — the server
+      // wiped the table) still reconciles everything away at the boundary.
+      let snapKeys: Set<string> | null = null
       return {
         onSnap: (_key, row) => {
           ensureBegin()
           const key = getKey(row as T)
-          snapKeys?.add(key)
+          if (opts?.reconcileSnapshots) (snapKeys ??= new Set()).add(key)
           // A held key's snapshot row is an upsert: hydrated rows may have
           // changed since dehydration, and a differing insert would throw
           // DuplicateKeySyncError. With the C1′ barrier a snapshot row is
@@ -182,14 +182,19 @@ export function doCollectionOptions<T extends object>(
           write(syncedHas(key) ? { type: "update", value: row } : { type: "insert", value: row })
         },
         onSnapEnd: () => {
-          if (snapKeys) {
+          if (opts?.reconcileSnapshots) {
+            const seen = snapKeys // null ⇒ empty snapshot ⇒ empty authoritative set
+            snapKeys = null
             const sd = syncedData()
-            if (!sd) throw new Error("hydration reconcile requires collection._state.syncedData (incompatible @tanstack/db)")
-            ensureBegin()
+            if (!sd) throw new Error("snapshot reconcile requires collection._state.syncedData (incompatible @tanstack/db)")
             for (const key of sd.keys()) {
-              if (!snapKeys.has(key)) write({ type: "delete", key })
+              // ensureBegin only when a delete is actually due — the common
+              // converged/empty case stays boundary-free.
+              if (!seen?.has(key)) {
+                ensureBegin()
+                write({ type: "delete", key })
+              }
             }
-            snapKeys = null // one boundary settles the hydrated state; disarm
           }
           flush()
           onReady()
@@ -372,28 +377,28 @@ export function doCollectionOptions<T extends object>(
       }
     }
 
-    // eager
+    // eager — reconcile is ALWAYS armed: an eager snapshot is authoritative
+    // set semantics over synced rows, period (ADR-0011 D4). For the normal
+    // empty-at-first-snapshot flow it is a no-op; for ANY path where synced
+    // rows precede a snapshot — hydration with no resume point, hydration
+    // whose meta failed validation (rows land before importSyncMeta; no
+    // veto), futures we haven't imagined — it is what prevents a
+    // server-deleted held row from being stale forever. C1′ makes it sound
+    // mid-session too: a held synced key absent from a snapshot is deleted.
     {
       const hc = consumeHydratedCursor()
+      const handler = makeHandler(markReady, { reconcileSnapshots: true })
       if (hc !== null) {
         // Hydrated (ADR-0011 D3): the rows were applied upstream as synced
         // upserts before we ran. Resume from the dehydrated cursor (server
         // catch-up; below the floor an honest reset + resnapshot) — or, with
-        // no resume point ("0"), take a fresh snapshot and RECONCILE it (D4).
+        // no resume point ("0"), take a fresh snapshot and reconcile it.
         // Ready NOW: stale-while-revalidate is the explicit SSR contract —
         // first paint renders the hydrated rows, the boundary converges them.
-        void transport.subscribe(
-          eagerSubId,
-          table,
-          makeHandler(markReady, { reconcileSnapshots: true }),
-          where,
-          undefined,
-          undefined,
-          hc === "0" ? undefined : hc,
-        )
+        void transport.subscribe(eagerSubId, table, handler, where, undefined, undefined, hc === "0" ? undefined : hc)
         markReady()
       } else {
-        void transport.subscribe(eagerSubId, table, makeHandler(markReady), where)
+        void transport.subscribe(eagerSubId, table, handler, where)
       }
     }
     return () => {
@@ -449,9 +454,19 @@ export function doCollectionOptions<T extends object>(
   })
   const importSyncMeta = (meta: unknown): void => {
     // Upstream applies the dehydrated rows BEFORE this runs — there is no
-    // veto. Validation failure throws out of hydrate(): fail loud, never
-    // resume from a cursor we don't understand.
-    const m = parseSyncMeta(meta)
+    // veto. So a validation failure must fail loud AND fail safe: the rows
+    // are in syncedData regardless, and silently skipping our bookkeeping
+    // would start sync down the no-resume path with no reconcile intent —
+    // a server-deleted hydrated row would then be stale forever. Set the
+    // safe state ("0" → snapshot + reconcile) FIRST, then throw so the
+    // version/corruption skew still surfaces to the app.
+    let m: DoSyncMeta
+    try {
+      m = parseSyncMeta(meta)
+    } catch (e) {
+      hydratedCursor = "0"
+      throw e
+    }
     if (m.where === whereFingerprint) {
       hydratedCursor = m.cursor
       transport.seedCursor(m.cursor)
@@ -464,8 +479,19 @@ export function doCollectionOptions<T extends object>(
     }
   }
   const mergeSyncMeta = (current: unknown, incoming: unknown): DoSyncMeta => {
-    const a = parseSyncMeta(current)
-    const b = parseSyncMeta(incoming)
+    // Same fail-loud-but-SAFE contract as importSyncMeta: upstream calls
+    // merge (then import) AFTER applying the chunk's rows, so a parse throw
+    // here also can't veto anything — and upstream never reaches
+    // importSyncMeta when merge throws, which would skip the safety net.
+    let a: DoSyncMeta
+    let b: DoSyncMeta
+    try {
+      a = parseSyncMeta(current)
+      b = parseSyncMeta(incoming)
+    } catch (e) {
+      hydratedCursor = "0"
+      throw e
+    }
     // MIN is self-healing: a late chunk's rows were already applied over
     // newer state (no veto); resuming from the EARLIER position replays the
     // window idempotently and re-freshens whatever the chunk clobbered.
