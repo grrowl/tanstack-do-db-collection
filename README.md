@@ -259,6 +259,10 @@ browser-verified.
 - **[`examples/on-demand`](./examples/on-demand)** — `syncMode: 'on-demand'`:
   categorised items where each panel loads only its subset (`loadSubset`/
   `unloadSubset`) and unopened categories are never synced.
+- **[`examples/ssr`](./examples/ssr)** — server-side rendering (experimental):
+  a TanStack Start app on Cloudflare reads the DO **without a WebSocket**
+  (`readSnapshot`), dehydrates into the route payload, hydrates for an instant
+  first paint, and converges live from the dehydrated cursor.
 - **[`examples/board`](./examples/board)** — the at-scale stress test: 5,000
   tasks on one DO with a bounded window, `useLiveInfiniteQuery` cursor
   scroll-back, and a mutable order key so voting bumps a task to the top
