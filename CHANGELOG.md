@@ -8,7 +8,14 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Cursor barrier (C1′, ADR-0011).** A snapshot or catch-up served on a socket
+  with still-buffered coalesced deltas could advance the client's cursor past
+  an undelivered write (multi-collection reconnect; drop before the tick lost
+  the write). The server now flushes the socket's pending deltas before any
+  synchronous cursor-advancing emission — ADR-0002 C1 generalized from
+  `committed` to all cursor boundaries.
 
 ## [0.3.0] — 2026-06-09
 
