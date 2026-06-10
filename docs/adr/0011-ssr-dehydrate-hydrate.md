@@ -171,6 +171,12 @@ would resume over an empty store and silently lose data):
   sent** (not completed): `loadSubset` subs fire only after ready, so on the
   single ordered socket the catch-up always precedes subset snapshots
   (second-review finding — `connect().then(markReady)` alone races).
+  Wire note: the transient's teardown depends on the server scoping the
+  catch-up terminal (`uptodate.sub`); against a pre-0011 server the terminal
+  arrives unscoped and the transient sub never tears down (an unfiltered
+  live sub leaks until the socket drops). Matter-of-fact, not mitigated:
+  pre-1.0, client/server version skew is not a supported configuration —
+  the worker ships the bundle and the DO from one deploy.
   When the hydrated rows are **unresumable** — cursor `"0"`, or the server
   `reset`s the catch-up below the floor — on-demand **truncates** them
   (the reset path also unsubscribes immediately so the trailing unfiltered

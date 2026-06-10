@@ -2,7 +2,9 @@
 
 **Status:** Accepted. Amends [ADR-0001](./0001-sync-architecture.md). C5's
 changelog-retention floor is refined by
-[ADR-0009](./0009-changelog-time-retention.md).
+[ADR-0009](./0009-changelog-time-retention.md). C1's flush-before-`committed`
+barrier is generalized to ALL cursor-advancing emissions (C1′) by
+[ADR-0011](./0011-ssr-dehydrate-hydrate.md).
 
 ## Context
 
