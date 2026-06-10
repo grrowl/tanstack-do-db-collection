@@ -15,6 +15,8 @@ export default {
       const room = url.pathname.slice("/sync/".length) || "main"
       return env.TODOS_DO.get(env.TODOS_DO.idFromName(room)).fetch(req)
     }
-    return handler.fetch(req, env, ctx)
+    // Start's RequestHandler takes (request, opts?) — env/ctx reach server
+    // code through the `cloudflare:workers` module, not positional args.
+    return handler.fetch(req)
   },
 } satisfies ExportedHandler<Env>

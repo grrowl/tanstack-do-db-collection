@@ -9,38 +9,70 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
+import { Route as DbRouteImport } from './routes/_db'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as DbLiveSuspenseQueryRouteImport } from './routes/_db.live-suspense-query'
+import { Route as DbLiveQueryRouteImport } from './routes/_db.live-query'
 
+const DbRoute = DbRouteImport.update({
+  id: '/_db',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DbLiveSuspenseQueryRoute = DbLiveSuspenseQueryRouteImport.update({
+  id: '/live-suspense-query',
+  path: '/live-suspense-query',
+  getParentRoute: () => DbRoute,
+} as any)
+const DbLiveQueryRoute = DbLiveQueryRouteImport.update({
+  id: '/live-query',
+  path: '/live-query',
+  getParentRoute: () => DbRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/live-query': typeof DbLiveQueryRoute
+  '/live-suspense-query': typeof DbLiveSuspenseQueryRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/live-query': typeof DbLiveQueryRoute
+  '/live-suspense-query': typeof DbLiveSuspenseQueryRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/_db': typeof DbRouteWithChildren
+  '/_db/live-query': typeof DbLiveQueryRoute
+  '/_db/live-suspense-query': typeof DbLiveSuspenseQueryRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/live-query' | '/live-suspense-query'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/live-query' | '/live-suspense-query'
+  id: '__root__' | '/' | '/_db' | '/_db/live-query' | '/_db/live-suspense-query'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  DbRoute: typeof DbRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+    '/_db': {
+      id: '/_db'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof DbRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -48,11 +80,38 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_db/live-suspense-query': {
+      id: '/_db/live-suspense-query'
+      path: '/live-suspense-query'
+      fullPath: '/live-suspense-query'
+      preLoaderRoute: typeof DbLiveSuspenseQueryRouteImport
+      parentRoute: typeof DbRoute
+    }
+    '/_db/live-query': {
+      id: '/_db/live-query'
+      path: '/live-query'
+      fullPath: '/live-query'
+      preLoaderRoute: typeof DbLiveQueryRouteImport
+      parentRoute: typeof DbRoute
+    }
   }
 }
 
+interface DbRouteChildren {
+  DbLiveQueryRoute: typeof DbLiveQueryRoute
+  DbLiveSuspenseQueryRoute: typeof DbLiveSuspenseQueryRoute
+}
+
+const DbRouteChildren: DbRouteChildren = {
+  DbLiveQueryRoute: DbLiveQueryRoute,
+  DbLiveSuspenseQueryRoute: DbLiveSuspenseQueryRoute,
+}
+
+const DbRouteWithChildren = DbRoute._addFileChildren(DbRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  DbRoute: DbRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
