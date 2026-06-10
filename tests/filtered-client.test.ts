@@ -51,7 +51,7 @@ function startFiltered(transport: WebSocketTransport, where: unknown): { calls: 
   const calls: Array<Call> = []
   const adapter = doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id, where })
   ;(adapter as unknown as { sync: { sync: (p: unknown) => void } }).sync.sync({
-    collection: {},
+    collection: { get: () => undefined }, // adapter consults held keys (held-insert upsert)
     begin: () => calls.push(["begin"]),
     write: (m: unknown) => calls.push(["write", m]),
     commit: () => calls.push(["commit"]),

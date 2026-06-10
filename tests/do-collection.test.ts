@@ -48,7 +48,7 @@ function startSync(transport: WebSocketTransport): { calls: Array<Call> } {
   // sync lives on opts.sync.sync; invoke with spy controls (cast: type-only dep).
   const syncConfig = (opts as unknown as { sync: { sync: (p: unknown) => void } }).sync
   syncConfig.sync({
-    collection: {},
+    collection: { get: () => undefined }, // adapter consults held keys (held-insert upsert)
     begin: () => calls.push(["begin"]),
     write: (m: unknown) => calls.push(["write", m]),
     commit: () => calls.push(["commit"]),
@@ -93,7 +93,7 @@ describe("doCollectionOptions (M3 adapter)", () => {
     const adapter = doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (r) => r.id })
     const calls: Array<Call> = []
     ;(adapter as unknown as { sync: { sync: (p: unknown) => void } }).sync.sync({
-      collection: {},
+      collection: { get: () => undefined },
       begin: () => calls.push(["begin"]),
       write: (m: unknown) => calls.push(["write", m]),
       commit: () => calls.push(["commit"]),

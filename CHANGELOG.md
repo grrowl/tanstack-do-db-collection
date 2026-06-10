@@ -10,6 +10,12 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Fixed
 
+- **Catch-up reinsert no longer wedges the client.** A key deleted-and-
+  reinserted while a client was away arrives in the catch-up as op=`insert`
+  for a key the client still holds; TanStack's sync write throws
+  `DuplicateKeySyncError` on that, aborting the whole catch-up transaction.
+  The adapter now applies a held-key insert as the upsert it semantically is
+  (the move-in update-upsert contract, ADR-0002 C4).
 - **Cursor barrier (C1′, ADR-0011).** A snapshot or catch-up served on a socket
   with still-buffered coalesced deltas could advance the client's cursor past
   an undelivered write (multi-collection reconnect; drop before the tick lost
