@@ -10,6 +10,7 @@ import { DbClient } from "@tanstack/db"
 import { DbProvider } from "@tanstack/react-db"
 import { createFileRoute, Link, Outlet } from "@tanstack/react-router"
 import { createServerFn } from "@tanstack/react-start"
+import { getRequest } from "@tanstack/react-start/server"
 import { env } from "cloudflare:workers"
 import * as React from "react"
 import { SsrSnapshotTransport, WebSocketTransport } from "../../../../src/client/index.ts"
@@ -37,8 +38,14 @@ type SerializableDbState = {
 // REQUEST; module scope would leak cursor state across requests (ADR-0011 D2).
 const getDbState = createServerFn().handler(async () => {
   const ns = (env as unknown as Env).TODOS_DO
-  const stub = ns.get(ns.idFromName("main")) as unknown as { readSyncSnapshot: SnapshotRead }
-  const transport = new SsrSnapshotTransport({ read: (req) => stub.readSyncSnapshot(req) })
+  const stub = ns.get(ns.idFromName("main")) as unknown as {
+    readSyncSnapshot: (r: Parameters<SnapshotRead>[0], request: Request) => ReturnType<SnapshotRead>
+  }
+  // The DO runs the incoming request through parseAttachment — the SAME auth
+  // gate the WS upgrade gets. This app has no auth, but the shape means an
+  // app that does can't bypass its own check via the read path.
+  const request = getRequest()
+  const transport = new SsrSnapshotTransport({ read: (req) => stub.readSyncSnapshot(req, request) })
   const db = new DbClient()
   const todos = db.collection(todosOptions(transport)) as unknown as { preload: () => Promise<void> }
   await todos.preload()

@@ -94,7 +94,11 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
   }
 
   protected override parseAttachment(req: Request): Claims {
-    return { userId: req.headers.get("x-user") ?? "anon" }
+    const userId = req.headers.get("x-user") ?? "anon"
+    // Sentinel for gate tests: parseAttachment is the ONE auth gate for both
+    // the WS upgrade and the readSyncSnapshot RPC (ADR-0011 D1).
+    if (userId === "forbidden") throw new Response("forbidden", { status: 403 })
+    return { userId }
   }
 }
 

@@ -19,8 +19,12 @@ interface Msg {
 
 /** Exactly what an SSR worker passes: the DO stub's RPC, as a function. */
 function makeRead(room: string): SnapshotRead {
-  const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room)) as unknown as { readSyncSnapshot: SnapshotRead }
-  return (req) => stub.readSyncSnapshot(req)
+  const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room)) as unknown as {
+    readSyncSnapshot: (r: Parameters<SnapshotRead>[0], request: Request) => ReturnType<SnapshotRead>
+  }
+  // The author closes over the claims-bearing Request; the transport's read
+  // contract stays {collection, where, ...} only.
+  return (req) => stub.readSyncSnapshot(req, new Request("https://example.com/ssr", { headers: { "x-user": "anon" } }))
 }
 
 async function seed(room: string, rows: Array<[string, string]>): Promise<void> {

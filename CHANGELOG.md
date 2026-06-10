@@ -13,10 +13,12 @@ While pre-1.0, the public API may change between 0.x releases.
 - **SSR support (experimental — ADR-0011; tracks TanStack DB draft PR
   [#1564](https://github.com/TanStack/db/pull/1564), whose hook signatures may
   change).** Dehydrate on the worker, hydrate to the cursor:
-  - `SyncDurableObject.readSyncSnapshot({ collection, where?, orderBy?, limit? })`
+  - `SyncDurableObject.readSyncSnapshot({ collection, where?, orderBy?, limit? }, request)`
     — one consistent `{ rows, cursor }` read over the DO binding, no
-    WebSocket. The cursor is a durable high-water mark; `"0"` honestly means
-    "no resume point".
+    WebSocket. The required `request` runs through `parseAttachment` — the
+    same auth gate as the WS upgrade, so one tenant check guards both paths.
+    The cursor is a durable high-water mark; `"0"` honestly means "no resume
+    point".
   - `SsrSnapshotTransport` — runs the same `doCollectionOptions` inside a
     per-request server `DbClient` (eager preload and on-demand
     `loadSubset`/live-query preload both work); read-only, writes throw

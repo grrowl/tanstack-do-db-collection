@@ -221,7 +221,9 @@ import { DbClient, collectionOptions } from "@tanstack/db"
 import { doCollectionOptions, SsrSnapshotTransport } from "tanstack-do-db-collection/client"
 
 const stub = env.CHAT_DO.get(env.CHAT_DO.idFromName(sessionId))
-const transport = new SsrSnapshotTransport({ read: (req) => stub.readSyncSnapshot(req) })
+// `request` is the incoming (claims-bearing) Request — the DO runs it through
+// parseAttachment, the SAME auth gate as the WebSocket upgrade.
+const transport = new SsrSnapshotTransport({ read: (req) => stub.readSyncSnapshot(req, request) })
 const db = new DbClient()
 const messages = db.collection(
   collectionOptions(doCollectionOptions<Message>({ transport, table: "messages", getKey: (m) => m.id })),
@@ -243,9 +245,10 @@ const messages = db.collection(
 )
 ```
 
-Mutations during SSR throw (`SsrReadOnlyError`); `readSyncSnapshot` is callable by
-any worker holding the DO binding — the same trust boundary as the upgrade's
-forged-claims header, so end users never reach it.
+Mutations during SSR throw (`SsrReadOnlyError`). `readSyncSnapshot` is callable
+by any worker holding the DO binding, and its required `request` argument runs
+through `parseAttachment` — **one auth gate for both the socket and the read
+path**, so a tenant check in `parseAttachment` can't be bypassed by SSR.
 
 ---
 

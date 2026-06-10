@@ -23,8 +23,10 @@ interface Msg {
 }
 
 function makeRead(room: string): SnapshotRead {
-  const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room)) as unknown as { readSyncSnapshot: SnapshotRead }
-  return (req) => stub.readSyncSnapshot(req)
+  const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room)) as unknown as {
+    readSyncSnapshot: (r: Parameters<SnapshotRead>[0], request: Request) => ReturnType<SnapshotRead>
+  }
+  return (req) => stub.readSyncSnapshot(req, new Request("https://example.com/ssr", { headers: { "x-user": "anon" } }))
 }
 
 function makeWsTransport(room: string): WebSocketTransport {

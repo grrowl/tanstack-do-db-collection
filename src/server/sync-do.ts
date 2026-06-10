@@ -110,21 +110,31 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
 
   /**
    * One consistent snapshot of a collection plus a durable resume cursor,
-   * WITHOUT a WebSocket — the SSR read path (ADR-0011 D1). Synchronous SQLite,
-   * so rows and cursor are at one position. Callable over the binding as RPC
-   * by any first-party worker — the binding is the trust boundary, exactly as
-   * the Worker-forged-claims model is for the WS upgrade; end users never
-   * reach this. Throws on an unknown collection or an un-lowerable predicate
-   * (fail loud; RPC propagates the error to the caller).
+   * WITHOUT a WebSocket — the SSR read path (ADR-0011 D1). Throws on an
+   * unknown collection or an un-lowerable predicate (fail loud; RPC
+   * propagates the error to the caller).
+   *
+   * `request` is REQUIRED and runs through the SAME gate as the WS upgrade:
+   * `parseAttachment` — pass the claims-bearing Request the worker already
+   * forges (or forwards) for the socket path. One hook guards both paths, so
+   * an author's tenant check cannot be silently bypassed by the read path
+   * (and the minted claims are the seam where uniform read-scoping would
+   * land, on subs and snapshots alike). A rejecting parseAttachment rejects
+   * the RPC. The await happens BEFORE the reads: rows and cursor are still
+   * taken at one position (synchronous SQLite, no await between them).
    *
    * The cursor is the durable high-water mark, not bare `currentSeq` — see
    * `highWaterSeq`. A cursor of "0" honestly means "no resume point" and the
    * client must reconcile a fresh snapshot instead of catching up.
    */
-  readSyncSnapshot(req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number }): {
+  async readSyncSnapshot(
+    req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number },
+    request: Request,
+  ): Promise<{
     rows: Array<Record<string, SqlStorageValue>>
     cursor: string
-  } {
+  }> {
+    await this.parseAttachment(request) // the one gate (claims unused until read-scoping exists)
     const coll = this.registry.collections.get(req.collection)
     if (!coll) throw new Error(`readSyncSnapshot: unknown collection '${req.collection}'`)
     const query = compileSubsetQuery(req.collection, {

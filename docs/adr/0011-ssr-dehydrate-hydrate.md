@@ -44,15 +44,28 @@ cursor through the dehydrated state, and make the first sub carry `since`.
 `SyncDurableObject` gains a public RPC method:
 
 ```ts
-readSyncSnapshot(req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number })
-  : { rows: Array<Record<string, SqlStorageValue>>; cursor: string }
+readSyncSnapshot(
+  req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number },
+  request: Request, // REQUIRED — runs through parseAttachment, the one auth gate
+): Promise<{ rows: Array<Record<string, SqlStorageValue>>; cursor: string }>
 ```
 
-Same compile path as the `fetch` frame (`compileSubsetQuery`); synchronous
-SQLite, so rows and cursor are at one position. Throws on unknown collection or
-unsupported predicate — fail loud; RPC propagates. Trust model: callable by any
-worker holding the binding, the same boundary as the Worker-forged-claims model
-for WS auth (the SSR worker is first-party).
+Same compile path as the `fetch` frame (`compileSubsetQuery`); the gate awaits
+*before* the reads, so rows and cursor are still taken at one position
+(synchronous SQLite between them). Throws on unknown collection or unsupported
+predicate — fail loud; RPC propagates.
+
+Trust model: the binding limits callers to first-party workers, and the
+REQUIRED `request` argument runs through **`parseAttachment` — the same gate
+as the WS upgrade**. The worker passes the claims-bearing Request it already
+forges (or forwards) for the socket path; a rejecting `parseAttachment`
+rejects the read. Two paths, one gate: an author's tenant check cannot be
+silently bypassed by the snapshot read (grill-session finding — an earlier
+draft had no gate here, inverting the WS path's safe-by-default shape). The
+minted claims are also the seam where uniform read-scoping would land, on
+subs and snapshots alike — note that today *neither* path filters rows by
+identity; `parseAttachment` is connection/read-level gating, and the
+client-supplied `where` is shaping, not security.
 
 **The exported cursor is a durable high-water mark** — `max(MAX(_sync_changes
 .seq), drain_cursor)` — *not* bare `currentSeq()`, because retention can prune
@@ -66,7 +79,8 @@ means "no resume point": the client omits `since` and reconciles (D4).
 What `doCollectionOptions` consumes becomes a structural `Transport` interface
 (satisfied by `WebSocketTransport` unchanged). `SsrSnapshotTransport` implements
 it for server rendering: constructor takes `read: (req) => Promise<{rows,
-cursor}>` (the author passes `(req) => stub.readSyncSnapshot(req)`; no Cloudflare
+cursor}>` (the author passes `(req) => stub.readSyncSnapshot(req, request)`,
+closing over the request's claims; no Cloudflare
 types in the client build). `subscribe` performs one read and synthesizes
 `onSnap*`/`onSnapEnd`; `connect()` resolves immediately (so on-demand
 `loadSubset` during a server `preload()` works unchanged); its cursor is the

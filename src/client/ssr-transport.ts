@@ -7,8 +7,9 @@
 // throw away.
 //
 // The reader is injected as a plain function so this file carries no Cloudflare
-// types; the author passes `(req) => stub.readSyncSnapshot(req)` (the SyncDurableObject
-// RPC). The binding is the trust boundary, as for the WS upgrade's claims model.
+// types; the author passes `(req) => stub.readSyncSnapshot(req, request)` (the
+// SyncDurableObject RPC), closing over the same claims-bearing Request the WS
+// upgrade gets — parseAttachment is the ONE auth gate for both paths.
 //
 // SSR is read-only: mutations during render are a design error, not a queue —
 // they throw. Create one transport (and one options object) PER REQUEST; a

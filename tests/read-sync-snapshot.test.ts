@@ -17,13 +17,29 @@ function stubFor(room: string): DurableObjectStub {
   return env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
 }
 
-/** Call over the binding like an SSR worker would (real RPC, not instance poking). */
-async function readSyncSnapshot(room: string, req: SnapshotReq): Promise<SnapshotRes> {
-  const stub = stubFor(room) as unknown as { readSyncSnapshot: (r: SnapshotReq) => Promise<SnapshotRes> }
-  return stub.readSyncSnapshot(req)
+/** Call over the binding like an SSR worker would (real RPC, not instance
+ *  poking), passing the same claims-bearing Request the WS upgrade gets. */
+async function readSyncSnapshot(room: string, req: SnapshotReq, user = "anon"): Promise<SnapshotRes> {
+  const stub = stubFor(room) as unknown as {
+    readSyncSnapshot: (r: SnapshotReq, request: Request) => Promise<SnapshotRes>
+  }
+  return stub.readSyncSnapshot(req, new Request("https://example.com/ssr", { headers: { "x-user": user } }))
 }
 
 describe("readSyncSnapshot RPC (SSR read path, ADR-0011 D1)", () => {
+  it("runs the SAME gate as the WS upgrade: a rejecting parseAttachment rejects the read", async () => {
+    const room = `snap-gate-${crypto.randomUUID()}`
+    await runInDurableObject(stubFor(room), (_i, s) => {
+      s.storage.sql.exec("INSERT INTO messages(id,body) VALUES('a','secret')")
+    })
+    // The author's one auth hook guards both paths — a tenant check cannot be
+    // silently bypassed by the snapshot read.
+    await expect(readSyncSnapshot(room, { collection: "messages" }, "forbidden")).rejects.toThrow()
+    // ...and a passing identity reads normally.
+    const { rows } = await readSyncSnapshot(room, { collection: "messages" })
+    expect(rows).toHaveLength(1)
+  })
+
   it("returns current rows and a cursor that resumes past them", async () => {
     const room = `snap-${crypto.randomUUID()}`
     await runInDurableObject(stubFor(room), (_i, s) => {
