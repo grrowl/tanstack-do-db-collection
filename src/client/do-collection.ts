@@ -64,6 +64,22 @@ interface SyncParams {
   truncate: () => void
 }
 
+/** The opaque payload that rides TanStack's dehydrated state (ADR-0011 D3).
+ *  Shape is ours; `v` gates forward evolution loudly. */
+export interface DoSyncMeta {
+  v: 1
+  cursor: string
+}
+
+function parseSyncMeta(meta: unknown): DoSyncMeta {
+  const m = meta as Partial<DoSyncMeta> | null
+  if (m == null || m.v !== 1 || typeof m.cursor !== "string") {
+    throw new Error(`unrecognized sync meta (expected {v:1, cursor}): ${JSON.stringify(meta)}`)
+  }
+  BigInt(m.cursor) // malformed cursor throws here — fail loud, never resume from garbage
+  return { v: 1, cursor: m.cursor }
+}
+
 /** Subset of @tanstack/db's LoadSubsetOptions we consume. */
 interface LoadSubsetOptions {
   where?: unknown
@@ -92,8 +108,33 @@ export function doCollectionOptions<T extends object>(
   // Set by sync(); used by mutationFn to retire no-subset-match optimistic rows.
   let emptyCommit: (() => void) | null = null
 
+  // SSR hydration's resume point (ADR-0011 D3). Set by importSyncMeta — which
+  // upstream calls AFTER applying the dehydrated rows as synced upserts, and
+  // possibly BEFORE sync() ever runs (lazy collections). Consumed exactly once
+  // at sync start and cleared in cleanup: after a collection GC the rows are
+  // wiped, so a retained cursor would resume over an empty store and silently
+  // lose everything below it.
+  let hydratedCursor: string | null = null
+
   const sync = (params: SyncParams): SyncConfigResult => {
     const { collection, begin, write, commit, markReady, truncate } = params
+    const consumeHydratedCursor = (): string | null => {
+      const hc = hydratedCursor
+      hydratedCursor = null
+      return hc
+    }
+    // Presence in SYNCED data — the combined view (collection.get) includes
+    // optimistic overlays, which sync writes must never be steered by: a key
+    // under an optimistic delete still exists synced (insert would throw), and
+    // an optimistic-only insert does not (update would not upsert the synced
+    // store the hydration correction targets). `_state.syncedData` is the same
+    // seam upstream's DbClient hydration itself writes through.
+    const syncedData = (): Map<string, unknown> | null =>
+      (collection as { _state?: { syncedData?: Map<string, unknown> } })._state?.syncedData ?? null
+    const syncedHas = (key: string): boolean => {
+      const sd = syncedData()
+      return sd ? sd.has(key) : collection.get(key) !== undefined
+    }
     let open = false
     const ensureBegin = (): void => {
       if (!open) {
@@ -113,45 +154,113 @@ export function doCollectionOptions<T extends object>(
       commit() // a standalone empty boundary; runs the direct-upsert clear path
     }
 
-    const makeHandler = (onReady: () => void): SubHandler => ({
-      onSnap: (_key, row) => {
-        ensureBegin()
-        write({ type: "insert", value: row })
-      },
-      onSnapEnd: () => {
-        flush()
-        onReady()
-      },
-      onDelta: (op, key, cols) => {
-        ensureBegin()
-        if (op === "delete") write({ type: "delete", key: key as string })
-        // A catch-up emits the LATEST op per changed key, so a key deleted-and-
-        // reinserted while we were away arrives as "insert" for a key we still
-        // HOLD — TanStack's sync write throws DuplicateKeySyncError on that
-        // unless values deep-equal. Apply a held-key insert as the upsert it
-        // semantically is (update upserts; the move-in contract, ADR-0002 C4).
-        else if (op === "insert" && collection.get(key as string) !== undefined) write({ type: "update", value: cols })
-        else write({ type: op, value: cols })
-      },
-      onUptodate: () => flush(),
-      onReset: () => {
-        flush()
-        begin()
-        truncate()
-        commit()
-        // A reset is also the only terminal signal for a REJECTED sub (the
-        // server sends `reset` with no `snap-end` for an unsupported predicate
-        // or unknown collection). Mark ready here too, or this subset's load
-        // promise — and the live query's preload() — would hang forever. For a
-        // compaction/rotation reset (a valid sub that re-snapshots) this is an
-        // idempotent no-op: onSnapEnd's onReady() has already fired.
-        onReady()
-      },
-    })
+    const makeHandler = (onReady: () => void, opts?: { reconcileSnapshots?: boolean }): SubHandler => {
+      // `reconcileSnapshots` is armed only for a hydrated collection (ADR-0011
+      // D4): a fresh snapshot can then arrive OVER held synced rows (cursor
+      // "0" = no resume point), and a snapshot is authoritative SET semantics
+      // — held keys absent from it were deleted server-side, and snapshots
+      // carry no tombstones. Track the snapshot's keys and delete the rest at
+      // the boundary; no truncate, so the first paint never flashes empty.
+      let snapKeys: Set<string> | null = null
+      return {
+        onSnap: (_key, row) => {
+          ensureBegin()
+          const key = getKey(row as T)
+          if (opts?.reconcileSnapshots) (snapKeys ??= new Set()).add(key)
+          // A held key's snapshot row is an upsert: hydrated rows may have
+          // changed since dehydration, and a differing insert would throw
+          // DuplicateKeySyncError. With the C1′ barrier a snapshot row is
+          // never staler than the held synced row, so the snapshot wins.
+          write(syncedHas(key) ? { type: "update", value: row } : { type: "insert", value: row })
+        },
+        onSnapEnd: () => {
+          if (opts?.reconcileSnapshots && snapKeys) {
+            const sd = syncedData()
+            if (!sd) throw new Error("hydration reconcile requires collection._state.syncedData (incompatible @tanstack/db)")
+            ensureBegin()
+            for (const key of sd.keys()) {
+              if (!snapKeys.has(key)) write({ type: "delete", key })
+            }
+            snapKeys = null
+          }
+          flush()
+          onReady()
+        },
+        onDelta: (op, key, cols) => {
+          ensureBegin()
+          if (op === "delete") write({ type: "delete", key: key as string })
+          // A catch-up emits the LATEST op per changed key, so a key deleted-
+          // and-reinserted while we were away arrives as "insert" for a key we
+          // still HOLD — TanStack's sync write throws DuplicateKeySyncError on
+          // that unless values deep-equal. Apply a held-key insert as the
+          // upsert it semantically is (update upserts; move-in, ADR-0002 C4).
+          else if (op === "insert" && syncedHas(key as string)) write({ type: "update", value: cols })
+          else write({ type: op, value: cols })
+        },
+        onUptodate: () => flush(),
+        onReset: () => {
+          flush()
+          begin()
+          truncate()
+          commit()
+          // A reset is also the only terminal signal for a REJECTED sub (the
+          // server sends `reset` with no `snap-end` for an unsupported predicate
+          // or unknown collection). Mark ready here too, or this subset's load
+          // promise — and the live query's preload() — would hang forever. For a
+          // compaction/rotation reset (a valid sub that re-snapshots) this is an
+          // idempotent no-op: onSnapEnd's onReady() has already fired.
+          onReady()
+        },
+      }
+    }
 
     if (syncMode === "on-demand") {
       // Ready as soon as connected; data arrives per loadSubset.
       void transport.connect().then(() => markReady())
+
+      // Hydration catch-up (ADR-0011 D3): the dehydrated rows are the union of
+      // whatever subsets the server render loaded — per-subset resume is
+      // unsound (a subset the render didn't cover has no since to resume
+      // from, and overlapping predicates leave stale-delete holes). ONE
+      // transient unfiltered sub from the dehydrated cursor covers every
+      // changed key (always-emit ⇒ synthetic deletes included) in the
+      // render→hydrate window, then unsubscribes at ITS terminal — never at a
+      // broadcast boundary, which can precede its own frames. Registered
+      // BEFORE any loadSubset sub, so a below-floor reset's truncate lands
+      // before subset snapshots repopulate. Semantic cost (documented): rows
+      // outside any loaded subset that changed in the window land in the
+      // collection. With no resume point ("0") it degrades to one full
+      // snapshot + reconcile — stale-while-revalidate, never stale-forever.
+      {
+        const hc = consumeHydratedCursor()
+        if (hc !== null) {
+          const catchupId = `${table}#hydrate#${++subSeq}`
+          const done = (): void => transport.unsubscribe(catchupId)
+          const base = makeHandler(() => {}, { reconcileSnapshots: true })
+          void transport.subscribe(
+            catchupId,
+            table,
+            {
+              onSnap: base.onSnap,
+              onSnapEnd: () => {
+                base.onSnapEnd() // reconcile + flush (the cursor-"0" snapshot path)
+                done()
+              },
+              onDelta: base.onDelta,
+              onUptodate: (ownTerminal) => {
+                flush()
+                if (ownTerminal) done()
+              },
+              onReset: base.onReset, // truncate; the fresh snapshot follows on this sub
+            },
+            undefined,
+            undefined,
+            undefined,
+            hc === "0" ? undefined : hc,
+          )
+        }
+      }
+
       // Distinct `where` -> one refcounted server subscription.
       const loaded = new Map<string, { subId: string; refs: number; ready: Promise<void> }>()
       const keyOf = (o: LoadSubsetOptions): string => JSON.stringify(o.where ?? null)
@@ -226,12 +335,44 @@ export function doCollectionOptions<T extends object>(
         }
       }
 
-      return { loadSubset, unloadSubset, cleanup: () => transport.close() }
+      return {
+        loadSubset,
+        unloadSubset,
+        cleanup: () => {
+          hydratedCursor = null // GC wiped the rows; a retained cursor would lie
+          transport.close()
+        },
+      }
     }
 
     // eager
-    void transport.subscribe(eagerSubId, table, makeHandler(markReady), where)
-    return () => transport.unsubscribe(eagerSubId)
+    {
+      const hc = consumeHydratedCursor()
+      if (hc !== null) {
+        // Hydrated (ADR-0011 D3): the rows were applied upstream as synced
+        // upserts before we ran. Resume from the dehydrated cursor (server
+        // catch-up; below the floor an honest reset + resnapshot) — or, with
+        // no resume point ("0"), take a fresh snapshot and RECONCILE it (D4).
+        // Ready NOW: stale-while-revalidate is the explicit SSR contract —
+        // first paint renders the hydrated rows, the boundary converges them.
+        void transport.subscribe(
+          eagerSubId,
+          table,
+          makeHandler(markReady, { reconcileSnapshots: true }),
+          where,
+          undefined,
+          undefined,
+          hc === "0" ? undefined : hc,
+        )
+        markReady()
+      } else {
+        void transport.subscribe(eagerSubId, table, makeHandler(markReady), where)
+      }
+    }
+    return () => {
+      hydratedCursor = null // GC wiped the rows; a retained cursor would lie
+      transport.unsubscribe(eagerSubId)
+    }
   }
 
   const mutationFn = async (params: {
@@ -268,11 +409,31 @@ export function doCollectionOptions<T extends object>(
     }
   }
 
+  // SSR syncMeta hooks (ADR-0011 D3) — called by TanStack's DbClient
+  // dehydrate/hydrate (draft PR #1564); inert on older @tanstack/db versions.
+  const exportSyncMeta = (): DoSyncMeta => ({ v: 1, cursor: transport.appliedCursor })
+  const importSyncMeta = (meta: unknown): void => {
+    // Upstream applies the dehydrated rows BEFORE this runs — there is no
+    // veto. Validation failure throws out of hydrate(): fail loud, never
+    // resume from a cursor we don't understand.
+    const m = parseSyncMeta(meta)
+    hydratedCursor = m.cursor
+    transport.seedCursor(m.cursor)
+  }
+  const mergeSyncMeta = (current: unknown, incoming: unknown): DoSyncMeta => {
+    const a = parseSyncMeta(current)
+    const b = parseSyncMeta(incoming)
+    // MIN is self-healing: a late chunk's rows were already applied over
+    // newer state (no veto); resuming from the EARLIER position replays the
+    // window idempotently and re-freshens whatever the chunk clobbered.
+    return BigInt(a.cursor) <= BigInt(b.cursor) ? a : b
+  }
+
   return {
     id: opts.id ?? table,
     getKey,
     syncMode,
-    sync: { sync, rowUpdateMode: "partial" },
+    sync: { sync, rowUpdateMode: "partial", exportSyncMeta, importSyncMeta, mergeSyncMeta },
     onInsert: mutationFn,
     onUpdate: mutationFn,
     onDelete: mutationFn,

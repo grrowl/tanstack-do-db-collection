@@ -8,7 +8,32 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **SSR support (experimental — ADR-0011; tracks TanStack DB draft PR
+  [#1564](https://github.com/TanStack/db/pull/1564), whose hook signatures may
+  change).** Dehydrate on the worker, hydrate to the cursor:
+  - `SyncDurableObject.readSnapshot({ collection, where?, orderBy?, limit? })`
+    — one consistent `{ rows, cursor }` read over the DO binding, no
+    WebSocket. The cursor is a durable high-water mark; `"0"` honestly means
+    "no resume point".
+  - `SsrSnapshotTransport` — runs the same `doCollectionOptions` inside a
+    per-request server `DbClient` (eager preload and on-demand
+    `loadSubset`/live-query preload both work); read-only, writes throw
+    `SsrReadOnlyError`. Create one per request.
+  - `doCollectionOptions` now implements `exportSyncMeta` / `importSyncMeta`
+    / `mergeSyncMeta` (`{ v: 1, cursor }`, opaque to TanStack; inert on older
+    `@tanstack/db`). A hydrated collection is ready immediately
+    (stale-while-revalidate), resumes its first sub from the dehydrated
+    cursor (server catch-up; honest reset below the retention floor), and
+    with no resume point reconciles a fresh snapshot as authoritative set
+    semantics — no flash-to-empty, no stranded deletes. On-demand mode adds
+    one transient unfiltered catch-up sub that unsubscribes at its own
+    terminal. Late/streamed chunks self-heal: the cursor claim only ever
+    shrinks (`seedCursor`), and the idempotent replay re-freshens clobbered
+    rows.
+  - Wire: `uptodate` gains an optional `sub` (a catch-up's terminal is
+    sub-scoped; additive). `sub` frames accept `since` on first subscribe.
 
 ## [0.3.1] — 2026-06-11
 

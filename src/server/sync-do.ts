@@ -569,7 +569,9 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
         this.send(ws, { t: "d", sub: sub.subId, key, op: change.op, cols: row, seq })
       }
     }
-    this.send(ws, { t: "uptodate", seq })
+    // Sub-scoped terminal: this catch-up is one subscription's bootstrap, not
+    // a socket-wide boundary (ADR-0011 D3). Still advances the client cursor.
+    this.send(ws, { t: "uptodate", seq, sub: sub.subId })
   }
 
   /** Encode and send a server frame on one socket. */

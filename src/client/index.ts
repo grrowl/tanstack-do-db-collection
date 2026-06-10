@@ -12,6 +12,10 @@ export {
   MutationRejectedError,
   WebSocketTransport,
 } from "./transport.ts"
-export type { SubHandler, TransportOptions, WebSocketLike } from "./transport.ts"
+export type { SubHandler, Transport, TransportOptions, WebSocketLike } from "./transport.ts"
 export { doCollectionOptions, WriteOutsideSubError } from "./do-collection.ts"
-export type { DoCollectionOptions } from "./do-collection.ts"
+export type { DoCollectionOptions, DoSyncMeta } from "./do-collection.ts"
+// SSR (experimental — tracks TanStack DB draft PR #1564; ADR-0011). Create one
+// SsrSnapshotTransport PER REQUEST and pass `(req) => stub.readSnapshot(req)`.
+export { SsrReadOnlyError, SsrSnapshotTransport } from "./ssr-transport.ts"
+export type { SnapshotRead } from "./ssr-transport.ts"

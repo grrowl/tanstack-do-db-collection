@@ -31,7 +31,11 @@ export interface SubHandler {
   onSnap(key: unknown, row: unknown): void
   onSnapEnd(): void
   onDelta(op: RowOp, key: unknown, cols: Record<string, unknown> | undefined): void
-  onUptodate(): void
+  /** `ownTerminal` is true only for a sub-scoped boundary addressed to THIS
+   *  subscription (a catch-up's terminal, ADR-0011 D3) — a transient
+   *  subscription may tear itself down on it, but never on a broadcast
+   *  boundary, which can precede its own catch-up frames. */
+  onUptodate(ownTerminal?: boolean): void
   onReset(): void
 }
 
@@ -336,7 +340,10 @@ export class WebSocketTransport {
         this.handlers.get(frame.sub)?.handler.onDelta(frame.op, frame.key, frame.cols)
         return
       case "uptodate":
-        for (const { handler } of this.handlers.values()) handler.onUptodate()
+        // A sub-scoped terminal (a catch-up's) goes to its handler alone; a
+        // broadcast boundary (coalescer tick / barrier flush) goes to all.
+        if (frame.sub) this.handlers.get(frame.sub)?.handler.onUptodate(true)
+        else for (const { handler } of this.handlers.values()) handler.onUptodate(false)
         this.advance(frame.seq)
         return
       case "committed": {
