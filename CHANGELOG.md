@@ -27,11 +27,15 @@ While pre-1.0, the public API may change between 0.x releases.
     (stale-while-revalidate), resumes its first sub from the dehydrated
     cursor (server catch-up; honest reset below the retention floor), and
     with no resume point reconciles a fresh snapshot as authoritative set
-    semantics — no flash-to-empty, no stranded deletes. On-demand mode adds
-    one transient unfiltered catch-up sub that unsubscribes at its own
-    terminal. Late/streamed chunks self-heal: the cursor claim only ever
-    shrinks (`seedCursor`), and the idempotent replay re-freshens clobbered
-    rows.
+    semantics — no flash-to-empty, no stranded deletes (an EMPTY snapshot
+    reconciles too). The cursor is fingerprinted to the eager `where`; a
+    changed filter refuses it and downgrades to snapshot reconcile. On-demand
+    mode adds one transient unfiltered catch-up sub (readiness gates on it
+    being sent) that unsubscribes at its own sub-scoped terminal; unresumable
+    hydrated rows are truncated, never left to go permanently stale.
+    Late/streamed chunks self-heal: the cursor claim only ever shrinks
+    (`seedCursor`), and a live regress rides a forced reconnect so stale
+    in-flight boundaries can't re-claim past the repair window.
   - Wire: `uptodate` gains an optional `sub` (a catch-up's terminal is
     sub-scoped; additive). `sub` frames accept `since` on first subscribe.
 

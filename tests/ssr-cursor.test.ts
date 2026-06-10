@@ -1,6 +1,8 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { type SubHandler, WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
+import { createFrameCodec } from "../src/wire/frame-codec.ts"
+import type { ClientFrame, ServerFrame } from "../src/wire/frames.ts"
 
 // WHY (ADR-0011 D3): SSR hydration hands a client rows it did not stream — so
 // the FIRST sub must be able to resume from the dehydrated cursor (server
@@ -141,6 +143,81 @@ describe("transport cursor bootstrap (SSR hydration, ADR-0011 D3)", () => {
     await waitFor(() => events.slice(before).some((e) => e[0] === "d" && e[2] === "a"))
     await waitFor(() => BigInt(t.appliedCursor) >= BigInt(advanced))
     expect(events.slice(before).some((e) => e[0] === "snap")).toBe(false) // replay, not re-snapshot
+    t.close()
+  })
+
+  it("a stale pre-regress boundary cannot re-advance the claim; the fresh socket replays from the seed", async () => {
+    // Fully fake sockets: a live regress rides a RECONNECT because the old
+    // socket's already-queued boundary frames (full duplex) would otherwise
+    // re-advance the cursor past the repair window — then a drop would resume
+    // beyond it and the late chunk's clobbered rows would stay stale forever.
+    const codec = createFrameCodec()
+    interface Fake {
+      ws: WebSocketLike
+      sent: Array<ClientFrame>
+      emit: (type: string, ev: { data?: unknown }) => void
+      closeCalled: boolean
+    }
+    const makeFake = (): Fake => {
+      const listeners = new Map<string, Array<(ev: { data?: unknown }) => void>>()
+      const fake: Fake = {
+        sent: [],
+        closeCalled: false,
+        emit: (type, ev) => {
+          for (const l of listeners.get(type) ?? []) l(ev)
+        },
+        ws: {
+          send: (data) => fake.sent.push(codec.decode(data as ArrayBuffer | string) as ClientFrame),
+          close: () => {
+            fake.closeCalled = true // close event delivery is the TEST's choice
+          },
+          addEventListener: (type, l) => {
+            const arr = listeners.get(type) ?? []
+            arr.push(l)
+            listeners.set(type, arr)
+          },
+          removeEventListener: () => {},
+        },
+      }
+      return fake
+    }
+    const fakes: Array<Fake> = []
+    const t = new WebSocketTransport({
+      url: "wss://fake",
+      reconnectDelayMs: 1,
+      open: () => {
+        const f = makeFake()
+        fakes.push(f)
+        return f.ws
+      },
+    })
+    const { handler } = recorder()
+    await t.subscribe("s1", "messages", handler)
+    const server = (frame: ServerFrame, fake = fakes.at(-1)!): void =>
+      fake.emit("message", { data: codec.encode(frame) })
+
+    server({ t: "snap-end", sub: "s1", seq: "100" })
+    expect(t.appliedCursor).toBe("100")
+
+    // Late chunk → regress. The transport must abandon this socket.
+    t.seedCursor("50")
+    expect(t.appliedCursor).toBe("50")
+    expect(fakes[0]!.closeCalled).toBe(true)
+
+    // A boundary the server sent BEFORE the close (still queued client-side)
+    // must not count: the claim holds at the seed.
+    server({ t: "uptodate", seq: "101" }, fakes[0]!)
+    expect(t.appliedCursor).toBe("50")
+
+    // Now the close lands; the fresh socket resubscribes FROM the seed...
+    fakes[0]!.emit("close", {})
+    await waitFor(() => fakes.length === 2 && fakes[1]!.sent.some((f) => f.t === "sub"))
+    const resub = fakes[1]!.sent.find((f) => f.t === "sub") as Extract<ClientFrame, { t: "sub" }>
+    expect(resub.since).toBe("50")
+
+    // ...and its frames own the cursor again.
+    server({ t: "uptodate", seq: "102" })
+    expect(t.appliedCursor).toBe("102")
     t.close()
   })
 })

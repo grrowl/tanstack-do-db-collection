@@ -16,6 +16,7 @@
 //     post-mutation empty sync commit (ADR-0002 C2, verified).
 
 import { compileSingleRowExpression, toBooleanPredicate, type CollectionConfig } from "@tanstack/db"
+import { encode as codecEncode } from "../wire/codec.ts"
 import type { MutOp, RowOp } from "../wire/frames.ts"
 import type { SubHandler, Transport } from "./transport.ts"
 
@@ -65,19 +66,23 @@ interface SyncParams {
 }
 
 /** The opaque payload that rides TanStack's dehydrated state (ADR-0011 D3).
- *  Shape is ours; `v` gates forward evolution loudly. */
+ *  Shape is ours; `v` gates forward evolution loudly. `where` fingerprints the
+ *  eager filter the rows were dehydrated under: a cursor is only a sound
+ *  resume point FOR THAT FILTER (catch-up emits changed keys only — an
+ *  unchanged out-of-filter hydrated row would never be reconciled away). */
 export interface DoSyncMeta {
   v: 1
   cursor: string
+  where?: string
 }
 
 function parseSyncMeta(meta: unknown): DoSyncMeta {
   const m = meta as Partial<DoSyncMeta> | null
-  if (m == null || m.v !== 1 || typeof m.cursor !== "string") {
-    throw new Error(`unrecognized sync meta (expected {v:1, cursor}): ${JSON.stringify(meta)}`)
+  if (m == null || m.v !== 1 || typeof m.cursor !== "string" || (m.where !== undefined && typeof m.where !== "string")) {
+    throw new Error(`unrecognized sync meta (expected {v:1, cursor, where?}): ${JSON.stringify(meta)}`)
   }
   BigInt(m.cursor) // malformed cursor throws here — fail loud, never resume from garbage
-  return { v: 1, cursor: m.cursor }
+  return { v: 1, cursor: m.cursor, ...(m.where === undefined ? {} : { where: m.where }) }
 }
 
 /** Subset of @tanstack/db's LoadSubsetOptions we consume. */
@@ -161,12 +166,15 @@ export function doCollectionOptions<T extends object>(
       // — held keys absent from it were deleted server-side, and snapshots
       // carry no tombstones. Track the snapshot's keys and delete the rest at
       // the boundary; no truncate, so the first paint never flashes empty.
-      let snapKeys: Set<string> | null = null
+      // Initialized EAGERLY when armed: an EMPTY snapshot (zero snap frames,
+      // the server wiped the table) must still reconcile everything away at
+      // snap-end — a lazily-created set would silently skip it.
+      let snapKeys: Set<string> | null = opts?.reconcileSnapshots ? new Set() : null
       return {
         onSnap: (_key, row) => {
           ensureBegin()
           const key = getKey(row as T)
-          if (opts?.reconcileSnapshots) (snapKeys ??= new Set()).add(key)
+          snapKeys?.add(key)
           // A held key's snapshot row is an upsert: hydrated rows may have
           // changed since dehydration, and a differing insert would throw
           // DuplicateKeySyncError. With the C1′ barrier a snapshot row is
@@ -174,14 +182,14 @@ export function doCollectionOptions<T extends object>(
           write(syncedHas(key) ? { type: "update", value: row } : { type: "insert", value: row })
         },
         onSnapEnd: () => {
-          if (opts?.reconcileSnapshots && snapKeys) {
+          if (snapKeys) {
             const sd = syncedData()
             if (!sd) throw new Error("hydration reconcile requires collection._state.syncedData (incompatible @tanstack/db)")
             ensureBegin()
             for (const key of sd.keys()) {
               if (!snapKeys.has(key)) write({ type: "delete", key })
             }
-            snapKeys = null
+            snapKeys = null // one boundary settles the hydrated state; disarm
           }
           flush()
           onReady()
@@ -215,9 +223,6 @@ export function doCollectionOptions<T extends object>(
     }
 
     if (syncMode === "on-demand") {
-      // Ready as soon as connected; data arrives per loadSubset.
-      void transport.connect().then(() => markReady())
-
       // Hydration catch-up (ADR-0011 D3): the dehydrated rows are the union of
       // whatever subsets the server render loaded — per-subset resume is
       // unsound (a subset the render didn't cover has no since to resume
@@ -225,41 +230,63 @@ export function doCollectionOptions<T extends object>(
       // transient unfiltered sub from the dehydrated cursor covers every
       // changed key (always-emit ⇒ synthetic deletes included) in the
       // render→hydrate window, then unsubscribes at ITS terminal — never at a
-      // broadcast boundary, which can precede its own frames. Registered
-      // BEFORE any loadSubset sub, so a below-floor reset's truncate lands
-      // before subset snapshots repopulate. Semantic cost (documented): rows
-      // outside any loaded subset that changed in the window land in the
-      // collection. With no resume point ("0") it degrades to one full
-      // snapshot + reconcile — stale-while-revalidate, never stale-forever.
-      {
-        const hc = consumeHydratedCursor()
-        if (hc !== null) {
-          const catchupId = `${table}#hydrate#${++subSeq}`
-          const done = (): void => transport.unsubscribe(catchupId)
-          const base = makeHandler(() => {}, { reconcileSnapshots: true })
-          void transport.subscribe(
-            catchupId,
-            table,
-            {
-              onSnap: base.onSnap,
-              onSnapEnd: () => {
-                base.onSnapEnd() // reconcile + flush (the cursor-"0" snapshot path)
-                done()
-              },
-              onDelta: base.onDelta,
-              onUptodate: (ownTerminal) => {
-                flush()
-                if (ownTerminal) done()
-              },
-              onReset: base.onReset, // truncate; the fresh snapshot follows on this sub
+      // broadcast boundary, which can precede its own frames. Semantic cost
+      // (documented): rows outside any loaded subset that changed in the
+      // window land in the collection.
+      //
+      // With NO resume point ("0"), or when the server resets the catch-up
+      // (below the retention floor), the hydrated rows are honestly
+      // UNRESUMABLE: truncate. In on-demand a full snapshot would strand
+      // never-subscribed whole-table rows as permanently-stale state — worse
+      // than a one-roundtrip refetch of the live subsets. The reset path
+      // unsubscribes IMMEDIATELY so the server's trailing unfiltered
+      // resnapshot is dropped on the floor (no handler), and the subset subs
+      // repopulate right after.
+      //
+      // markReady gates on the catch-up sub FRAME being sent (not completed):
+      // loadSubset subs only fire after ready, so on the single ordered
+      // socket the catch-up's truncate/deltas always precede subset
+      // snapshots. Ready never waits for data — stale-while-revalidate.
+      const hc = consumeHydratedCursor()
+      let readyGate: Promise<void>
+      if (hc !== null && hc !== "0") {
+        const catchupId = `${table}#hydrate#${++subSeq}`
+        const done = (): void => transport.unsubscribe(catchupId)
+        readyGate = transport.subscribe(
+          catchupId,
+          table,
+          {
+            onSnap: () => {}, // catch-ups never snapshot; reset's resnapshot is dropped (unsubbed)
+            onSnapEnd: () => {},
+            onDelta: makeHandler(() => {}).onDelta,
+            onUptodate: (ownTerminal) => {
+              flush()
+              if (ownTerminal) done()
             },
-            undefined,
-            undefined,
-            undefined,
-            hc === "0" ? undefined : hc,
-          )
-        }
+            onReset: () => {
+              flush()
+              begin()
+              truncate()
+              commit()
+              done() // before the trailing resnapshot frames arrive
+            },
+          },
+          undefined,
+          undefined,
+          undefined,
+          hc,
+        )
+      } else if (hc === "0") {
+        // No resume point: drop the hydrated rows at sync start, honestly.
+        readyGate = transport.connect().then(() => {
+          begin()
+          truncate()
+          commit()
+        })
+      } else {
+        readyGate = transport.connect()
       }
+      void readyGate.then(() => markReady())
 
       // Distinct `where` -> one refcounted server subscription.
       const loaded = new Map<string, { subId: string; refs: number; ready: Promise<void> }>()
@@ -411,14 +438,30 @@ export function doCollectionOptions<T extends object>(
 
   // SSR syncMeta hooks (ADR-0011 D3) — called by TanStack's DbClient
   // dehydrate/hydrate (draft PR #1564); inert on older @tanstack/db versions.
-  const exportSyncMeta = (): DoSyncMeta => ({ v: 1, cursor: transport.appliedCursor })
+  // The eager `where` fingerprint is the codec envelope — stable for the same
+  // constructor code; a cross-deploy false mismatch merely downgrades to the
+  // (always-sound) snapshot-reconcile path.
+  const whereFingerprint = where == null ? undefined : codecEncode(where)
+  const exportSyncMeta = (): DoSyncMeta => ({
+    v: 1,
+    cursor: transport.appliedCursor,
+    ...(whereFingerprint === undefined ? {} : { where: whereFingerprint }),
+  })
   const importSyncMeta = (meta: unknown): void => {
     // Upstream applies the dehydrated rows BEFORE this runs — there is no
     // veto. Validation failure throws out of hydrate(): fail loud, never
     // resume from a cursor we don't understand.
     const m = parseSyncMeta(meta)
-    hydratedCursor = m.cursor
-    transport.seedCursor(m.cursor)
+    if (m.where === whereFingerprint) {
+      hydratedCursor = m.cursor
+      transport.seedCursor(m.cursor)
+    } else {
+      // The rows were dehydrated under a DIFFERENT eager filter: the cursor
+      // is not a sound resume point for ours (see DoSyncMeta). "0" routes the
+      // sync start to snapshot + reconcile; the transport cursor stays
+      // unseeded so a bootstrap-window reconnect resnapshots too.
+      hydratedCursor = "0"
+    }
   }
   const mergeSyncMeta = (current: unknown, incoming: unknown): DoSyncMeta => {
     const a = parseSyncMeta(current)

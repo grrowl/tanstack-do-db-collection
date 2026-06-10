@@ -77,18 +77,27 @@ types in the client build). `subscribe` performs one read and synthesizes
 
 `doCollectionOptions` implements the hooks:
 
-- `exportSyncMeta → { v: 1, cursor: transport.appliedCursor }`
-- `importSyncMeta` — validate (`v` unknown → throw), stash `hydratedCursor` in
-  the per-call closure, `transport.seedCursor(cursor)`.
+- `exportSyncMeta → { v: 1, cursor: transport.appliedCursor, where? }` —
+  `where` is a fingerprint (the codec envelope) of the eager filter the rows
+  were dehydrated under. A cursor is only a sound resume point *for that
+  filter*: catch-up emits changed keys only, so an **unchanged** out-of-filter
+  hydrated row would never be reconciled away (second-review finding).
+- `importSyncMeta` — validate (`v` unknown / malformed cursor → throw); a
+  fingerprint mismatch (deploy skew) refuses the cursor and downgrades to the
+  always-sound snapshot-reconcile path (`hydratedCursor = "0"`, transport
+  unseeded); otherwise stash `hydratedCursor` and `transport.seedCursor(c)`.
 - `mergeSyncMeta → min(cursor)` — min is self-healing: a late/stale chunk's
   rows are applied upstream before we're consulted, and a min cursor makes the
   next catch-up replay exactly the clobbered window.
 
 `seedCursor(c)` may **regress** `appliedSeq` (claiming a *shorter* applied
-prefix is always safe); if already subscribed it triggers `resubscribeAll()`,
-whose catch-up replay (latest-op-per-key against current rows) re-freshens
-whatever a late hydration chunk clobbered. One mechanism for early and late
-hydration; no second cursor, no ack channel.
+prefix is always safe). A regress while LIVE cannot replay on the same socket:
+boundary frames the server already sent (full duplex) would dispatch after the
+regress and re-advance the cursor past the repair window (second-review
+blocker). It therefore **forces a reconnect** — the old socket's queued
+boundaries stop counting (`advance` suppressed; their data still applies,
+idempotently) and the fresh socket resubscribes from the seed. One mechanism
+for early and late hydration; no second cursor, no ack channel.
 
 With a `hydratedCursor` (consumed once at sync start; cleared in the sync
 cleanup fn — after a collection GC the rows are wiped, so a retained cursor
@@ -98,19 +107,27 @@ would resume over an empty store and silently lose data):
   present; catch-up arrives as `d`+`uptodate`, which never fires `snap-end`).
   Below the retention floor the server answers `reset` → truncate + fresh
   snapshot: an explicit stale-while-revalidate choice, documented.
-- **On-demand**: `markReady()` on connect as today, plus **one transient
-  unfiltered catch-up sub** (`since = hydratedCursor`, no `where`) that
-  unsubscribes at `uptodate`/`reset`. The dehydrated rows are the union of the
-  server-loaded subsets; per-subset `since` is unsound for any subset the
-  dehydrated state didn't cover, and subset-tracking still leaves
-  overlapping-`where` stale-delete holes. One unfiltered catch-up covers every
-  changed key (always-emit ⇒ synthetic deletes included) in the seconds-wide
-  render→hydrate window. **Semantic cost, accepted and documented**: changes to
-  rows outside any hydrated subset land in the collection during that window,
-  weakening on-demand's "only loaded subsets are present" model (bounded by
-  change volume in the window). The catch-up sub is registered before any
-  `loadSubset` sub, so a below-floor `reset`'s truncate lands before subset
-  snapshots repopulate (frame order on one socket).
+- **On-demand**: **one transient unfiltered catch-up sub**
+  (`since = hydratedCursor`, no `where`) that unsubscribes at *its own*
+  sub-scoped terminal — never at a broadcast boundary, which can precede its
+  frames. The dehydrated rows are the union of the server-loaded subsets;
+  per-subset `since` is unsound for any subset the dehydrated state didn't
+  cover, and subset-tracking still leaves overlapping-`where` stale-delete
+  holes. One unfiltered catch-up covers every changed key (always-emit ⇒
+  synthetic deletes included) in the seconds-wide render→hydrate window.
+  **Semantic cost, accepted and documented**: changes to rows outside any
+  hydrated subset land in the collection during that window (bounded by
+  change volume). `markReady()` **gates on the catch-up sub frame being
+  sent** (not completed): `loadSubset` subs fire only after ready, so on the
+  single ordered socket the catch-up always precedes subset snapshots
+  (second-review finding — `connect().then(markReady)` alone races).
+  When the hydrated rows are **unresumable** — cursor `"0"`, or the server
+  `reset`s the catch-up below the floor — on-demand **truncates** them
+  (the reset path also unsubscribes immediately so the trailing unfiltered
+  resnapshot is dropped unhandled). A full-table snapshot was rejected here:
+  it would strand never-subscribed rows as *permanently stale* state, which
+  is worse than a one-roundtrip refetch of the live subsets. Eager keeps the
+  no-flash reconcile; on-demand keeps honesty.
 
 ### D4 — Snapshot reconciliation (and two pre-existing bugs fixed)
 
@@ -132,10 +149,15 @@ value and then dropping the socket loses that write forever. Instead:
   insert-if-absent: `page` frames never advance the cursor, and a page *can*
   be staler than a held row.)
 - **Key-reconcile for the hydrated-eager fresh-snapshot path**: when a
-  snapshot arrives over hydrated rows (cursor `"0"`, i.e. no resume point),
-  collect the snapshot's keys and at `snap-end` delete held keys absent from
-  it, scoped by the static `where` predicate. The honest set semantics of a
-  snapshot, without a truncate's flash-to-empty (SSR exists for first paint).
+  snapshot arrives over hydrated rows (cursor `"0"`, i.e. no resume point, or
+  a refused foreign-filter cursor), collect the snapshot's keys and at
+  `snap-end` delete held *synced* keys absent from it. The honest set
+  semantics of a snapshot, without a truncate's flash-to-empty (SSR exists
+  for first paint). The seen-set is initialized **eagerly** when armed: an
+  EMPTY snapshot (the server wiped the table) must still reconcile everything
+  away (second-review blocker — a lazily-created set silently skipped it).
+  Presence checks steer by `syncedData`, never the combined view — optimistic
+  overlays are invisible to sync writes by design.
 - **`onDelta` maps `insert` → `update` when the key exists** — catch-up emits
   the latest CDC op per key, so a delete-then-reinsert since the cursor arrives
   as `insert` against a held key and would throw. Pre-existing on reconnect

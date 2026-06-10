@@ -119,6 +119,12 @@ export class WebSocketTransport {
   private intentionallyClosed = false
   /** True while reconnecting, so connect() resubscribes on success. */
   private reconnecting = false
+  /** True between a live cursor REGRESS (late hydration) and the reconnect
+   *  that replays from it. The old socket's already-queued boundary frames
+   *  would otherwise re-advance the cursor past the repair window — their
+   *  data still applies (idempotent), but the claim must hold at the seed
+   *  until the fresh socket's replay owns it. */
+  private suppressAdvance = false
   private readonly reconnectDelayMs: number
 
   constructor(opts: TransportOptions) {
@@ -159,8 +165,44 @@ export class WebSocketTransport {
     const c = BigInt(cursor) // malformed cursor throws — fail loud, never guess
     if (c <= 0n) return // "0" honestly means: no resume point to claim
     if (c >= this.appliedSeq && this.appliedSeq !== 0n) return // never grow the claim
+    const wasLive = this.appliedSeq !== 0n && this.ws !== null
     this.appliedSeq = c
-    if (this.ws && this.handlers.size > 0) this.resubscribeAll()
+    if (wasLive && this.handlers.size > 0) {
+      // A live regress cannot replay on the SAME socket: boundary frames the
+      // server already sent (full duplex) would dispatch after the regress
+      // and re-advance the cursor past the repair window — then a drop
+      // resumes beyond it and the late chunk's clobbered rows stay stale
+      // forever. Force a reconnect instead: the old socket's queued frames
+      // stop counting (advance suppressed; their data still applies,
+      // idempotently), and the FRESH socket resubscribes from the seed —
+      // clean ordering, replay guaranteed.
+      this.suppressAdvance = true
+      this.forceReconnect()
+    }
+  }
+
+  /** Abandon the current socket and reconnect. Teardown is explicit — a
+   *  locally-initiated close does not reliably fire our own close event in
+   *  every runtime, and the close handler ignores abandoned sockets. */
+  private forceReconnect(): void {
+    const old = this.ws
+    this.ws = null
+    this.connectPromise = null
+    try {
+      old?.close()
+    } catch {
+      /* already dead; the reconnect proceeds regardless */
+    }
+    this.scheduleReconnect()
+  }
+
+  private scheduleReconnect(): void {
+    setTimeout(() => {
+      this.reconnecting = true
+      void this.connect().catch(() => {
+        /* next attempt retries on the following close */
+      })
+    }, this.reconnectDelayMs)
   }
 
   async connect(): Promise<void> {
@@ -178,29 +220,20 @@ export class WebSocketTransport {
       }
       ws.addEventListener("message", (ev) => this.onMessage(ev.data))
       ws.addEventListener("close", () => {
+        // A close for a socket we already abandoned (forceReconnect tore it
+        // down, or a newer connection is live) must not double-schedule.
+        if (this.ws !== ws) return
         this.ws = null
         this.connectPromise = null
         // Auto-reconnect on an unexpected drop while subscriptions are active.
-        if (!this.intentionallyClosed && this.handlers.size > 0) {
-          // The flag is set at SCHEDULING time, not in the timer: a demand-
-          // driven connect() (a mutation inside the reconnect window) may
-          // establish the fresh socket first, and it must run the resubscribe
-          // path too — or every subscription is silently dead on the new
-          // socket and the late timer wedges the flag (pre-existing bug, found
-          // in the ADR-0011 grill).
-          this.reconnecting = true
-          setTimeout(() => {
-            void this.connect().catch(() => {
-              /* next attempt retries on the following close */
-            })
-          }, this.reconnectDelayMs)
-        }
+        if (!this.intentionallyClosed && this.handlers.size > 0) this.scheduleReconnect()
       })
       this.ws = ws
       // On a reconnect, re-establish every subscription from our single applied
       // cursor so the server serves a windowed catch-up rather than a snapshot.
       if (this.reconnecting) {
         this.reconnecting = false
+        this.suppressAdvance = false // the fresh socket's frames own the cursor again
         this.resubscribeAll()
       }
     })()
@@ -382,6 +415,7 @@ export class WebSocketTransport {
   }
 
   private advance(seq: string): void {
+    if (this.suppressAdvance) return // stale pre-regress boundaries don't count
     const s = BigInt(seq)
     if (s > this.appliedSeq) this.appliedSeq = s
     if (this.seqWaiters.length === 0) return

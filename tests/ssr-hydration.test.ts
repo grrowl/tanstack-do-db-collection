@@ -56,17 +56,21 @@ async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
 }
 
 /** The branded options DbClient wants, around our adapter. One per "process". */
-function makeOptions(transport: WebSocketTransport | SsrSnapshotTransport, syncMode?: "eager" | "on-demand") {
+function makeOptions(
+  transport: WebSocketTransport | SsrSnapshotTransport,
+  syncMode?: "eager" | "on-demand",
+  where?: unknown,
+) {
   return collectionOptions(
-    doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id, syncMode }) as never,
+    doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id, syncMode, where }) as never,
   ) as never
 }
 
 /** Server render: per-request DbClient + snapshot transport → dehydrated state. */
-async function serverRender(room: string, syncMode?: "eager" | "on-demand") {
+async function serverRender(room: string, syncMode?: "eager" | "on-demand", where?: unknown) {
   const transport = new SsrSnapshotTransport({ read: makeRead(room) })
   const db = new DbClient()
-  const col = db.collection(makeOptions(transport, syncMode)) as unknown as {
+  const col = db.collection(makeOptions(transport, syncMode, where)) as unknown as {
     preload: () => Promise<void>
     get: (k: string) => Msg | undefined
   }
@@ -80,6 +84,15 @@ async function serverRender(room: string, syncMode?: "eager" | "on-demand") {
   }
   return db.dehydrate()
 }
+
+const whereEq = (field: string, value: unknown): unknown => ({
+  type: "func",
+  name: "eq",
+  args: [
+    { type: "ref", path: [field] },
+    { type: "val", value },
+  ],
+})
 
 describe("SSR round trip: dehydrate on the worker, hydrate + converge in the browser", () => {
   it("eager: hydrated rows render immediately, then converge (update applied, delete applied)", async () => {
@@ -145,6 +158,55 @@ describe("SSR round trip: dehydrate on the worker, hydrate + converge in the bro
     // The fresh snapshot is authoritative SET semantics: b is reconciled away.
     await waitFor(() => col.get("b") === undefined)
     expect(col.get("a")).toMatchObject({ body: "hi" })
+    ws.close()
+  })
+
+  it("eager with no resume point and a WIPED table: the empty snapshot still reconciles everything away", async () => {
+    const room = `rt-wipe-${crypto.randomUUID()}`
+    await sql(room, "INSERT INTO messages(id,body) VALUES('a','hi'),('b','yo')")
+    await sql(room, "DELETE FROM _sync_changes") // no resume point
+
+    const state = await serverRender(room)
+    expect(state.collections[0]!.rows).toHaveLength(2)
+
+    // Everything dies while the HTML is in flight: the catch-up snapshot has
+    // ZERO rows — which must still count as the authoritative (empty) set.
+    await sql(room, "DELETE FROM messages")
+
+    const ws = makeWsTransport(room)
+    const db = new DbClient()
+    db.hydrate(state as never)
+    const col = db.collection(makeOptions(ws)) as unknown as {
+      preload: () => Promise<void>
+      size: number
+    }
+    await col.preload()
+    expect(col.size).toBe(2) // stale first paint
+    await waitFor(() => col.size === 0) // honest convergence, not stale-forever
+    ws.close()
+  })
+
+  it("a CHANGED eager where between render and hydrate downgrades to snapshot reconcile", async () => {
+    const room = `rt-where-${crypto.randomUUID()}`
+    await sql(room, "INSERT INTO messages(id,body) VALUES('a','keep'),('b','other')")
+
+    // Rendered under where body='keep' — only 'a' is dehydrated, and the
+    // cursor is fingerprinted to THAT filter.
+    const state = await serverRender(room, undefined, whereEq("body", "keep"))
+    expect(state.collections[0]!.rows.map((r) => r.key)).toEqual(["a"])
+
+    // The browser ships a different filter (deploy skew). 'a' never changes
+    // after the render, so a since-catch-up would NEVER remove it — the
+    // foreign cursor must be refused and the snapshot reconciled instead.
+    const ws = makeWsTransport(room)
+    const db = new DbClient()
+    db.hydrate(state as never)
+    const col = db.collection(makeOptions(ws, undefined, whereEq("body", "other"))) as unknown as {
+      preload: () => Promise<void>
+      get: (k: string) => Msg | undefined
+    }
+    await col.preload()
+    await waitFor(() => col.get("b") !== undefined && col.get("a") === undefined)
     ws.close()
   })
 
