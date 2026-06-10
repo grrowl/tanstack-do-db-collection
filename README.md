@@ -206,6 +206,47 @@ One `WebSocketTransport` per DO is shared by every collection on that DO
 (multiplexed over the single socket). Pass `where` to
 `doCollectionOptions` to sync only a matching subset.
 
+### 4. SSR (experimental)
+
+Tracks TanStack DB's draft [`DbClient` SSR PR](https://github.com/TanStack/db/pull/1564);
+the upstream hooks may change before release. Why/how trade-offs live in
+[ADR-0011](./docs/adr/0011-ssr-dehydrate-hydrate.md).
+
+On the worker, render through a **per-request** `DbClient` backed by one
+snapshot read per subscription — no WebSocket from the render path:
+
+```ts
+// Route loader / server handler (per request!)
+import { DbClient, collectionOptions } from "@tanstack/db"
+import { doCollectionOptions, SsrSnapshotTransport } from "tanstack-do-db-collection/client"
+
+const stub = env.CHAT_DO.get(env.CHAT_DO.idFromName(sessionId))
+const transport = new SsrSnapshotTransport({ read: (req) => stub.readSnapshot(req) })
+const db = new DbClient()
+const messages = db.collection(
+  collectionOptions(doCollectionOptions<Message>({ transport, table: "messages", getKey: (m) => m.id })),
+)
+await messages.preload()
+return { dbState: db.dehydrate() } // rows + our cursor (opaque syncMeta)
+```
+
+In the browser, hydrate before going live. The collection is ready
+immediately with the dehydrated rows (stale-while-revalidate); the first sub
+resumes from the dehydrated cursor, so the catch-up applies exactly what
+changed while the HTML was in flight — updates *and* deletes:
+
+```ts
+const db = new DbClient()
+db.hydrate(dbState)
+const messages = db.collection(
+  collectionOptions(doCollectionOptions<Message>({ transport: wsTransport, table: "messages", getKey: (m) => m.id })),
+)
+```
+
+Mutations during SSR throw (`SsrReadOnlyError`); `readSnapshot` is callable by
+any worker holding the DO binding — the same trust boundary as the upgrade's
+forged-claims header, so end users never reach it.
+
 ---
 
 ## Examples
