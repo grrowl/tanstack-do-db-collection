@@ -4,15 +4,15 @@ import { createFrameCodec } from "../src/wire/frame-codec.ts"
 import type { ClientFrame, ServerFrame } from "../src/wire/frames.ts"
 
 // WHY: PRE-EXISTING bug found while grilling ADR-0011's forced-reconnect
-// design (the bug itself is in the plain reconnect path, present on this
-// branch; the forced-reconnect machinery is not). The `reconnecting` flag was
-// set inside the reconnect TIMER, so a connect() triggered on demand — a
-// mutation fired within reconnectDelayMs of a drop — established the fresh
-// socket with the flag still false: NO resubscribeAll, every subscription
-// silently dead (the server has no subs for the new socket), and the late
-// timer's connect() early-returned, wedging the flag. The flag must be set
-// when the reconnect is SCHEDULED, so whichever connect() establishes —
-// timer-driven or demand-driven — runs the resubscribe path.
+// design. The `reconnecting` flag was set inside the reconnect TIMER, so a
+// connect() triggered on demand — a mutation fired within reconnectDelayMs of
+// a drop — established the fresh socket with the flag still false: NO
+// resubscribeAll, every subscription silently dead (the server has no subs
+// for the new socket), and the late timer's connect() early-returned, wedging
+// the flag. On the forced-reconnect path the same race also left
+// suppressAdvance set: a frozen cursor. The flag must be set when the
+// reconnect is SCHEDULED, so whichever connect() establishes — timer-driven
+// or demand-driven — runs the resubscribe path.
 
 const codec = createFrameCodec()
 

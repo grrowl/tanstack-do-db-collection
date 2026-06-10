@@ -129,6 +129,14 @@ would resume over an empty store and silently lose data):
 
 - **Eager**: the first sub carries `since`; `markReady()` immediately (rows are
   present; catch-up arrives as `d`+`uptodate`, which never fires `snap-end`).
+  Be explicit about what this changes: **hydration redefines `ready` as
+  "renderable", not "synced"** — `isReady` is true on the server pass (no
+  socket will ever exist) and stays true offline with stale rows. That is the
+  stale-while-revalidate contract, deliberately. An app that wants a
+  "catching up → live" signal (a SyncIndicator) doesn't need new API: the
+  transport already exposes it — `awaitSeq(String(BigInt(dehydratedCursor) +
+  1n))` resolves at the first post-hydration boundary, i.e. caught up. Not
+  README material (sharp-edged); recorded here for when someone asks.
   Below the retention floor the server answers `reset` → truncate + fresh
   snapshot — which DOES flash empty between the truncate's commit and the
   snapshot's (unlike the cursor-`"0"` reconcile path). Accepted, not fixed:
@@ -153,17 +161,28 @@ would resume over an empty store and silently lose data):
   synthetic deletes included) in the seconds-wide render→hydrate window.
   **Semantic cost, accepted and documented**: changes to rows outside any
   hydrated subset land in the collection during that window (bounded by
-  change volume). `markReady()` **gates on the catch-up sub frame being
+  change volume). The leaked rows' staleness is **unobservable**: a live
+  query whose predicate matches one has a server sub with that same
+  predicate, whose snapshot/deltas converge it at observation time
+  (update-if-exists) — stale only while nothing looks, fresh by the time
+  anything does. Eager rendering of stale/leaked data is acceptable against
+  the snappy client-first UI it buys; the residual cost is memory, bounded
+  by seconds of change volume. `markReady()` **gates on the catch-up sub frame being
   sent** (not completed): `loadSubset` subs fire only after ready, so on the
   single ordered socket the catch-up always precedes subset snapshots
   (second-review finding — `connect().then(markReady)` alone races).
   When the hydrated rows are **unresumable** — cursor `"0"`, or the server
   `reset`s the catch-up below the floor — on-demand **truncates** them
   (the reset path also unsubscribes immediately so the trailing unfiltered
-  resnapshot is dropped unhandled). A full-table snapshot was rejected here:
-  it would strand never-subscribed rows as *permanently stale* state, which
-  is worse than a one-roundtrip refetch of the live subsets. Eager keeps the
-  no-flash reconcile; on-demand keeps honesty.
+  resnapshot is dropped unhandled). A full-table snapshot was rejected here —
+  and the principled line between this and the tolerated catch-up leak above
+  (both are "stale while unobserved, fresh when observed") is **on-demand's
+  memory contract**: memory proportional to what you observe. A seconds-wide
+  window of changed keys respects that contract asymptotically; a full-table
+  snapshot breaks it categorically — unbounded in table size, on the mode
+  whose purpose is not loading the table. The truncate refuses to convert
+  on-demand into accidental-eager. Eager keeps the no-flash reconcile;
+  on-demand keeps honesty.
 
 ### D4 — Snapshot reconciliation (and two pre-existing bugs fixed)
 
