@@ -17,7 +17,7 @@
 
 import { compileSingleRowExpression, toBooleanPredicate, type CollectionConfig } from "@tanstack/db"
 import type { MutOp, RowOp } from "../wire/frames.ts"
-import { type SubHandler, WebSocketTransport } from "./transport.ts"
+import type { SubHandler, Transport } from "./transport.ts"
 
 let subSeq = 0
 
@@ -29,8 +29,10 @@ export class WriteOutsideSubError extends Error {
 }
 
 export interface DoCollectionOptions<T extends object> {
-  /** One transport per DO; shared by all collections on that DO. */
-  transport: WebSocketTransport
+  /** One transport per DO; shared by all collections on that DO. In the
+   *  browser a WebSocketTransport; during SSR an SsrSnapshotTransport —
+   *  created PER REQUEST (ADR-0011 D2). */
+  transport: Transport
   /** Collection (table) name on the DO. */
   table: string
   /** Stable client-supplied key extractor (must match the server pk). */
