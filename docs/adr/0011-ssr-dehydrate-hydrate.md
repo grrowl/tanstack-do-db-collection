@@ -39,12 +39,12 @@ cursor through the dehydrated state, and make the first sub carry `since`.
 
 ## Decision
 
-### D1 — Socketless snapshot read: `readSnapshot` RPC
+### D1 — Socketless snapshot read: `readSyncSnapshot` RPC
 
 `SyncDurableObject` gains a public RPC method:
 
 ```ts
-readSnapshot(req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number })
+readSyncSnapshot(req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number })
   : { rows: Array<Record<string, SqlStorageValue>>; cursor: string }
 ```
 
@@ -66,7 +66,7 @@ means "no resume point": the client omits `since` and reconciles (D4).
 What `doCollectionOptions` consumes becomes a structural `Transport` interface
 (satisfied by `WebSocketTransport` unchanged). `SsrSnapshotTransport` implements
 it for server rendering: constructor takes `read: (req) => Promise<{rows,
-cursor}>` (the author passes `(req) => stub.readSnapshot(req)`; no Cloudflare
+cursor}>` (the author passes `(req) => stub.readSyncSnapshot(req)`; no Cloudflare
 types in the client build). `subscribe` performs one read and synthesizes
 `onSnap*`/`onSnapEnd`; `connect()` resolves immediately (so on-demand
 `loadSubset` during a server `preload()` works unchanged); its cursor is the

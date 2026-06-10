@@ -23,8 +23,8 @@ interface Msg {
 }
 
 function makeRead(room: string): SnapshotRead {
-  const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room)) as unknown as { readSnapshot: SnapshotRead }
-  return (req) => stub.readSnapshot(req)
+  const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room)) as unknown as { readSyncSnapshot: SnapshotRead }
+  return (req) => stub.readSyncSnapshot(req)
 }
 
 function makeWsTransport(room: string): WebSocketTransport {

@@ -13,7 +13,7 @@ While pre-1.0, the public API may change between 0.x releases.
 - **SSR support (experimental — ADR-0011; tracks TanStack DB draft PR
   [#1564](https://github.com/TanStack/db/pull/1564), whose hook signatures may
   change).** Dehydrate on the worker, hydrate to the cursor:
-  - `SyncDurableObject.readSnapshot({ collection, where?, orderBy?, limit? })`
+  - `SyncDurableObject.readSyncSnapshot({ collection, where?, orderBy?, limit? })`
     — one consistent `{ rows, cursor }` read over the DO binding, no
     WebSocket. The cursor is a durable high-water mark; `"0"` honestly means
     "no resume point".

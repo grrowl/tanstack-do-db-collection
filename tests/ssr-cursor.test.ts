@@ -62,9 +62,9 @@ function stubFor(room: string): DurableObjectStub {
 
 async function snapshotCursor(room: string): Promise<string> {
   const stub = stubFor(room) as unknown as {
-    readSnapshot: (r: { collection: string }) => Promise<{ rows: Array<unknown>; cursor: string }>
+    readSyncSnapshot: (r: { collection: string }) => Promise<{ rows: Array<unknown>; cursor: string }>
   }
-  return (await stub.readSnapshot({ collection: "messages" })).cursor
+  return (await stub.readSyncSnapshot({ collection: "messages" })).cursor
 }
 
 describe("transport cursor bootstrap (SSR hydration, ADR-0011 D3)", () => {

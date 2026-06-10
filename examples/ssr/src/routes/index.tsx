@@ -21,8 +21,8 @@ import type { Env } from "../todos-do.ts"
 // REQUEST; module scope would leak cursor state across requests (ADR-0011 D2).
 const getDbState = createServerFn().handler(async () => {
   const ns = (env as unknown as Env).TODOS_DO
-  const stub = ns.get(ns.idFromName("main")) as unknown as { readSnapshot: SnapshotRead }
-  const transport = new SsrSnapshotTransport({ read: (req) => stub.readSnapshot(req) })
+  const stub = ns.get(ns.idFromName("main")) as unknown as { readSyncSnapshot: SnapshotRead }
+  const transport = new SsrSnapshotTransport({ read: (req) => stub.readSyncSnapshot(req) })
   const db = new DbClient()
   const todos = db.collection(todosOptions(transport)) as unknown as { preload: () => Promise<void> }
   await todos.preload()

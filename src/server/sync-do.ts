@@ -121,12 +121,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
    * `highWaterSeq`. A cursor of "0" honestly means "no resume point" and the
    * client must reconcile a fresh snapshot instead of catching up.
    */
-  readSnapshot(req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number }): {
+  readSyncSnapshot(req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number }): {
     rows: Array<Record<string, SqlStorageValue>>
     cursor: string
   } {
     const coll = this.registry.collections.get(req.collection)
-    if (!coll) throw new Error(`readSnapshot: unknown collection '${req.collection}'`)
+    if (!coll) throw new Error(`readSyncSnapshot: unknown collection '${req.collection}'`)
     const query = compileSubsetQuery(req.collection, {
       where: req.where,
       orderBy: req.orderBy,

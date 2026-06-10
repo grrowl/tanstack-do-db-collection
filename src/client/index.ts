@@ -16,6 +16,6 @@ export type { SubHandler, Transport, TransportOptions, WebSocketLike } from "./t
 export { doCollectionOptions, WriteOutsideSubError } from "./do-collection.ts"
 export type { DoCollectionOptions, DoSyncMeta } from "./do-collection.ts"
 // SSR (experimental — tracks TanStack DB draft PR #1564; ADR-0011). Create one
-// SsrSnapshotTransport PER REQUEST and pass `(req) => stub.readSnapshot(req)`.
+// SsrSnapshotTransport PER REQUEST and pass `(req) => stub.readSyncSnapshot(req)`.
 export { SsrReadOnlyError, SsrSnapshotTransport } from "./ssr-transport.ts"
 export type { SnapshotRead } from "./ssr-transport.ts"

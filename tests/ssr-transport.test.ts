@@ -19,8 +19,8 @@ interface Msg {
 
 /** Exactly what an SSR worker passes: the DO stub's RPC, as a function. */
 function makeRead(room: string): SnapshotRead {
-  const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room)) as unknown as { readSnapshot: SnapshotRead }
-  return (req) => stub.readSnapshot(req)
+  const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room)) as unknown as { readSyncSnapshot: SnapshotRead }
+  return (req) => stub.readSyncSnapshot(req)
 }
 
 async function seed(room: string, rows: Array<[string, string]>): Promise<void> {

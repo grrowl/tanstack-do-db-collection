@@ -221,7 +221,7 @@ import { DbClient, collectionOptions } from "@tanstack/db"
 import { doCollectionOptions, SsrSnapshotTransport } from "tanstack-do-db-collection/client"
 
 const stub = env.CHAT_DO.get(env.CHAT_DO.idFromName(sessionId))
-const transport = new SsrSnapshotTransport({ read: (req) => stub.readSnapshot(req) })
+const transport = new SsrSnapshotTransport({ read: (req) => stub.readSyncSnapshot(req) })
 const db = new DbClient()
 const messages = db.collection(
   collectionOptions(doCollectionOptions<Message>({ transport, table: "messages", getKey: (m) => m.id })),
@@ -243,7 +243,7 @@ const messages = db.collection(
 )
 ```
 
-Mutations during SSR throw (`SsrReadOnlyError`); `readSnapshot` is callable by
+Mutations during SSR throw (`SsrReadOnlyError`); `readSyncSnapshot` is callable by
 any worker holding the DO binding — the same trust boundary as the upgrade's
 forged-claims header, so end users never reach it.
 
@@ -261,7 +261,7 @@ browser-verified.
   `unloadSubset`) and unopened categories are never synced.
 - **[`examples/ssr`](./examples/ssr)** — server-side rendering (experimental):
   a TanStack Start app on Cloudflare reads the DO **without a WebSocket**
-  (`readSnapshot`), dehydrates into the route payload, hydrates for an instant
+  (`readSyncSnapshot`), dehydrates into the route payload, hydrates for an instant
   first paint, and converges live from the dehydrated cursor.
 - **[`examples/board`](./examples/board)** — the at-scale stress test: 5,000
   tasks on one DO with a bounded window, `useLiveInfiniteQuery` cursor

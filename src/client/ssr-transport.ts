@@ -7,7 +7,7 @@
 // throw away.
 //
 // The reader is injected as a plain function so this file carries no Cloudflare
-// types; the author passes `(req) => stub.readSnapshot(req)` (the SyncDurableObject
+// types; the author passes `(req) => stub.readSyncSnapshot(req)` (the SyncDurableObject
 // RPC). The binding is the trust boundary, as for the WS upgrade's claims model.
 //
 // SSR is read-only: mutations during render are a design error, not a queue —

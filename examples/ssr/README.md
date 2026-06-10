@@ -54,7 +54,7 @@ go straight to the DO; every other request is the Start app via
 - `src/routes/index.tsx` — the round trip. A `createServerFn` (server-only by
   construction; the browser gets the payload instead of re-running the read)
   builds a **per-request** `DbClient` + `SsrSnapshotTransport` over
-  `stub.readSnapshot`, preloads, and returns `db.dehydrate()`. The component
+  `stub.readSyncSnapshot`, preloads, and returns `db.dehydrate()`. The component
   hydrates a fresh `DbClient` from that payload and creates the *same*
   collection options around the environment's transport.
 - `src/lib/todos.ts` — the one collection shape, three transports (the

@@ -18,19 +18,19 @@ function stubFor(room: string): DurableObjectStub {
 }
 
 /** Call over the binding like an SSR worker would (real RPC, not instance poking). */
-async function readSnapshot(room: string, req: SnapshotReq): Promise<SnapshotRes> {
-  const stub = stubFor(room) as unknown as { readSnapshot: (r: SnapshotReq) => Promise<SnapshotRes> }
-  return stub.readSnapshot(req)
+async function readSyncSnapshot(room: string, req: SnapshotReq): Promise<SnapshotRes> {
+  const stub = stubFor(room) as unknown as { readSyncSnapshot: (r: SnapshotReq) => Promise<SnapshotRes> }
+  return stub.readSyncSnapshot(req)
 }
 
-describe("readSnapshot RPC (SSR read path, ADR-0011 D1)", () => {
+describe("readSyncSnapshot RPC (SSR read path, ADR-0011 D1)", () => {
   it("returns current rows and a cursor that resumes past them", async () => {
     const room = `snap-${crypto.randomUUID()}`
     await runInDurableObject(stubFor(room), (_i, s) => {
       s.storage.sql.exec("INSERT INTO messages(id,body) VALUES('a','hi'),('b','yo')")
     })
 
-    const { rows, cursor } = await readSnapshot(room, { collection: "messages" })
+    const { rows, cursor } = await readSyncSnapshot(room, { collection: "messages" })
     expect(rows.map((r) => r.id).sort()).toEqual(["a", "b"])
     // The cursor covers the snapshot: every change that produced these rows is
     // at or below it, so a client resuming from it re-receives nothing.
@@ -40,7 +40,7 @@ describe("readSnapshot RPC (SSR read path, ADR-0011 D1)", () => {
     await runInDurableObject(stubFor(room), (_i, s) => {
       s.storage.sql.exec("INSERT INTO messages(id,body) VALUES('c','new')")
     })
-    const after = await readSnapshot(room, { collection: "messages" })
+    const after = await readSyncSnapshot(room, { collection: "messages" })
     expect(BigInt(after.cursor)).toBeGreaterThan(BigInt(cursor))
   })
 
@@ -51,14 +51,14 @@ describe("readSnapshot RPC (SSR read path, ADR-0011 D1)", () => {
     })
     // The serialized @tanstack/db IR shape a collection's `where` carries.
     const where = { type: "func", name: "gt", args: [{ type: "ref", path: ["id"] }, { type: "val", value: "a" }] }
-    const { rows } = await readSnapshot(room, { collection: "messages", where })
+    const { rows } = await readSyncSnapshot(room, { collection: "messages", where })
     expect(rows.map((r) => r.id)).toEqual(["b"])
   })
 
   it("throws on an unknown collection (fail loud, not empty-success)", async () => {
     const room = `snap-unknown-${crypto.randomUUID()}`
     await runInDurableObject(stubFor(room), () => {}) // materialize schema
-    await expect(readSnapshot(room, { collection: "nope" })).rejects.toThrow(/unknown collection/)
+    await expect(readSyncSnapshot(room, { collection: "nope" })).rejects.toThrow(/unknown collection/)
   })
 
   it("keeps a durable high-water cursor when retention has pruned the changelog empty", async () => {
@@ -66,7 +66,7 @@ describe("readSnapshot RPC (SSR read path, ADR-0011 D1)", () => {
     await runInDurableObject(stubFor(room), (_i, s) => {
       s.storage.sql.exec("INSERT INTO messages(id,body) VALUES('a','hi')")
     })
-    const before = await readSnapshot(room, { collection: "messages" })
+    const before = await readSyncSnapshot(room, { collection: "messages" })
     expect(BigInt(before.cursor)).toBeGreaterThan(0n)
 
     // Simulate retention pruning the whole log away (time passing). The drain
@@ -79,7 +79,7 @@ describe("readSnapshot RPC (SSR read path, ADR-0011 D1)", () => {
       s.storage.sql.exec("DELETE FROM _sync_changes")
     })
 
-    const after = await readSnapshot(room, { collection: "messages" })
+    const after = await readSyncSnapshot(room, { collection: "messages" })
     expect(after.rows).toHaveLength(1) // table rows are untouched by retention
     expect(BigInt(after.cursor)).toBeGreaterThanOrEqual(BigInt(before.cursor)) // never regresses to 0
   })
