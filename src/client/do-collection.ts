@@ -123,6 +123,12 @@ export function doCollectionOptions<T extends object>(
       onDelta: (op, key, cols) => {
         ensureBegin()
         if (op === "delete") write({ type: "delete", key: key as string })
+        // A catch-up emits the LATEST op per changed key, so a key deleted-and-
+        // reinserted while we were away arrives as "insert" for a key we still
+        // HOLD — TanStack's sync write throws DuplicateKeySyncError on that
+        // unless values deep-equal. Apply a held-key insert as the upsert it
+        // semantically is (update upserts; the move-in contract, ADR-0002 C4).
+        else if (op === "insert" && collection.get(key as string) !== undefined) write({ type: "update", value: cols })
         else write({ type: op, value: cols })
       },
       onUptodate: () => flush(),

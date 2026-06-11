@@ -133,8 +133,14 @@ export class WebSocketTransport {
         this.connectPromise = null
         // Auto-reconnect on an unexpected drop while subscriptions are active.
         if (!this.intentionallyClosed && this.handlers.size > 0) {
+          // The flag is set at SCHEDULING time, not in the timer: a demand-
+          // driven connect() (a mutation inside the reconnect window) may
+          // establish the fresh socket first, and it must run the resubscribe
+          // path too — or every subscription is silently dead on the new
+          // socket and the late timer wedges the flag (pre-existing bug, found
+          // in the ADR-0011 grill).
+          this.reconnecting = true
           setTimeout(() => {
-            this.reconnecting = true
             void this.connect().catch(() => {
               /* next attempt retries on the following close */
             })

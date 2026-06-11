@@ -480,6 +480,14 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       throw e
     }
 
+    // C1′ (ADR-0011, generalizing ADR-0002 C1): what follows is a synchronous
+    // cursor-advancing emission — a snapshot's `snap-end` or a catch-up's
+    // `uptodate` carries the CURRENT seq, which may include changes whose
+    // deltas are still buffered in the coalescer for this socket. Flush them
+    // first, or the client's cursor claims a seq it never applied and a drop
+    // before the tick loses the write (reconnect resumes past it).
+    this.broadcaster.flushOne(ws)
+
     const sub = this.subs.add(ws, frame.subId, frame.collection, frame.where)
     const seq = String(currentSeq(this.sql))
 

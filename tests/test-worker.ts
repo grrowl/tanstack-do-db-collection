@@ -111,10 +111,19 @@ export class MaintTestDO extends SyncTestDO {
   protected override readonly compactionEvery = 3
 }
 
+/** Same collections as SyncTestDO with an effectively-infinite coalescer tick:
+ *  enqueued deltas stay buffered until something calls flushOne explicitly.
+ *  Lets the cursor-barrier tests (ADR-0011 C1′) hold "pending egress" still
+ *  while a snapshot/catch-up is served on the same socket. */
+export class SlowTickDO extends SyncTestDO {
+  protected override readonly tickMs = 30_000
+}
+
 interface Env {
   TEST_DO: DurableObjectNamespace
   SYNC_DO: DurableObjectNamespace
   MAINT_DO: DurableObjectNamespace
+  SLOW_DO: DurableObjectNamespace
 }
 
 export default {
@@ -127,6 +136,10 @@ export default {
     if (url.pathname.startsWith("/maint/")) {
       const name = url.pathname.slice("/maint/".length) || "default"
       return env.MAINT_DO.get(env.MAINT_DO.idFromName(name)).fetch(req)
+    }
+    if (url.pathname.startsWith("/slow/")) {
+      const name = url.pathname.slice("/slow/".length) || "default"
+      return env.SLOW_DO.get(env.SLOW_DO.idFromName(name)).fetch(req)
     }
     return new Response("test-worker")
   },

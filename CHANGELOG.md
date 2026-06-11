@@ -10,6 +10,30 @@ While pre-1.0, the public API may change between 0.x releases.
 
 _Nothing yet._
 
+## [0.3.1] — 2026-06-11
+
+### Fixed
+
+- **Catch-up reinsert no longer wedges the client.** A key deleted-and-
+  reinserted while a client was away arrives in the catch-up as op=`insert`
+  for a key the client still holds; TanStack's sync write throws
+  `DuplicateKeySyncError` on that, aborting the whole catch-up transaction.
+  The adapter now applies a held-key insert as the upsert it semantically is
+  (the move-in update-upsert contract, ADR-0002 C4).
+- **Cursor barrier (C1′).** A snapshot or catch-up served on a socket
+  with still-buffered coalesced deltas could advance the client's cursor past
+  an undelivered write (multi-collection reconnect; drop before the tick lost
+  the write). The server now flushes the socket's pending deltas before any
+  synchronous cursor-advancing emission — ADR-0002 C1 generalized from
+  `committed` to all cursor boundaries.
+- **Reconnect window no longer kills subscriptions.** The `reconnecting` flag
+  was set inside the reconnect timer, so a mutation fired within the reconnect
+  delay of a drop established the fresh socket before the timer ran — with no
+  resubscribe, leaving every subscription silently dead on the new socket (and
+  the late timer wedged the flag). The flag is now set when the reconnect is
+  scheduled, so whichever connect wins — timer- or demand-driven — resubscribes
+  from the cursor.
+
 ## [0.3.0] — 2026-06-09
 
 ### Added
