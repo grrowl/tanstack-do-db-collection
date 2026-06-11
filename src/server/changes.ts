@@ -234,8 +234,28 @@ export function readChangesSince(sql: SqlStorage, cursor: number): Array<ChangeR
   )
 }
 
+/** One table's change rows with seq > cursor, in seq order. Uses the
+ *  `_sync_changes_tbl_seq` composite index — this is the per-table catch-up
+ *  read that index exists for. */
+export function readChangesSinceFor(
+  sql: SqlStorage,
+  tbl: string,
+  cursor: number,
+): Array<ChangeRow> {
+  return Array.from(
+    sql.exec<ChangeRow>(
+      "SELECT seq, tbl, key, op, ts FROM _sync_changes WHERE tbl = ? AND seq > ? ORDER BY seq",
+      tbl,
+      cursor,
+    ),
+  )
+}
+
 /** Current rows for a set of keys, for hydrating deltas. `tbl`/`pk` are
- *  validated identifiers (the SyncRegistry enforces this). */
+ *  validated identifiers (the SyncRegistry enforces this). Queries in chunks
+ *  of 64 to avoid SQLite bound-parameter limits and eliminate the N+1 pattern:
+ *  a reconnect catch-up over 500 keys now issues ⌈500/64⌉ = 8 queries instead
+ *  of 500. Identifiers are quoted; values are bound parameters. */
 export function hydrateRows(
   sql: SqlStorage,
   tbl: string,
@@ -243,11 +263,16 @@ export function hydrateRows(
   keys: Array<string>,
 ): Map<string, Record<string, SqlStorageValue>> {
   const out = new Map<string, Record<string, SqlStorageValue>>()
-  for (const k of keys) {
-    const rows = Array.from(
-      sql.exec<Record<string, SqlStorageValue>>(`SELECT * FROM ${tbl} WHERE ${pk} = ? LIMIT 1`, k),
-    )
-    if (rows.length > 0) out.set(k, rows[0]!)
+  const CHUNK = 64 // stay far below any SQLite bound-parameter limit
+  for (let i = 0; i < keys.length; i += CHUNK) {
+    const chunk = keys.slice(i, i + CHUNK)
+    const placeholders = chunk.map(() => "?").join(", ")
+    for (const row of sql.exec<Record<string, SqlStorageValue>>(
+      `SELECT * FROM "${tbl}" WHERE "${pk}" IN (${placeholders})`,
+      ...chunk,
+    )) {
+      out.set(String(row[pk]), row)
+    }
   }
   return out
 }
