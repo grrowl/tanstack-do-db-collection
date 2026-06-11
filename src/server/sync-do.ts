@@ -67,6 +67,19 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   protected readonly changelogRetentionMs: number | null = 172_800_000
   /** Dedup retention window (ms), independent of changelog retention (C5). */
   protected readonly dedupRetentionMs: number = 3_600_000
+  /** Maximum ops in a single `mut` frame (ADR-0012). Reject-don't-truncate:
+   *  a partial apply would silently drop client writes. Override in subclasses
+   *  to tune for your workload. */
+  protected readonly maxOpsPerMutation: number = 128
+  /** Maximum concurrent subscriptions per socket (ADR-0012). Over-limit subs
+   *  are refused with a `reset` frame so legitimate earlier subs keep flowing.
+   *  Override to tune for your data model. */
+  protected readonly maxSubsPerSocket: number = 256
+  /** Maximum inbound frame size in bytes (ADR-0012). Cloudflare's own cap is
+   *  ~1 MiB; this makes the bound explicit, testable, and overrideable.
+   *  Oversize frames are dropped + logged without closing the socket (mirrors
+   *  the undecodable-frame stance). */
+  protected readonly maxFrameBytes: number = 1_048_576
   private writesSinceCompaction = 0
   protected readonly broadcaster: Broadcaster
   private readonly liveWs = new Set<WebSocket>()
@@ -171,13 +184,31 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     // "ping"/"pong" are handled by the auto-response and never arrive here.
-    let frame: ClientFrame
+
+    // Reject oversize frames before decode (ADR-0012): mirrors the
+    // undecodable-frame stance — drop + log, no reply, no crash.
+    const byteLen = typeof message === "string" ? message.length : message.byteLength
+    if (byteLen > this.maxFrameBytes) {
+      console.error(`oversize frame dropped (${byteLen} bytes > maxFrameBytes ${this.maxFrameBytes})`)
+      return
+    }
+
+    let decoded: unknown
     try {
-      frame = this.codec.decode(message) as ClientFrame
+      decoded = this.codec.decode(message)
     } catch {
       return // ignore undecodable frames
     }
-    await this.dispatch(ws, frame)
+
+    // Shape-guard after decode (ADR-0012): a frame that decodes but has the
+    // wrong structure is dropped + logged. The guard runs BEFORE any SQL
+    // binding so no arbitrary decoded value reaches lookupTx or sql.exec.
+    if (!this.wellFormed(decoded)) {
+      console.error("malformed frame dropped", JSON.stringify(decoded))
+      return
+    }
+
+    await this.dispatch(ws, decoded)
   }
 
   override webSocketClose(ws: WebSocket): void {
@@ -188,6 +219,54 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   override webSocketError(ws: WebSocket): void {
     this.subs.removeAll(ws)
     this.liveWs.delete(ws)
+  }
+
+  /** Shape-guard: returns true iff `v` is a structurally valid ClientFrame.
+   *  (ADR-0012) Runs after decode, before any SQL binding — ensures no
+   *  arbitrary decoded value reaches lookupTx or sql.exec. */
+  private wellFormed(v: unknown): v is ClientFrame {
+    if (v === null || typeof v !== "object") return false
+    const f = v as Record<string, unknown>
+    const t = f["t"]
+    if (typeof t !== "string") return false
+
+    const isNonEmptyString = (x: unknown): x is string => typeof x === "string" && x.length > 0
+
+    switch (t) {
+      case "sub":
+        return (
+          isNonEmptyString(f["subId"]) &&
+          isNonEmptyString(f["collection"]) &&
+          (f["since"] === undefined || typeof f["since"] === "string") &&
+          (f["limit"] === undefined || typeof f["limit"] === "number") &&
+          (f["offset"] === undefined || typeof f["offset"] === "number")
+        )
+      case "unsub":
+        return typeof f["subId"] === "string"
+      case "mut": {
+        if (!isNonEmptyString(f["txId"]) || !isNonEmptyString(f["collection"])) return false
+        if (!Array.isArray(f["ops"]) || f["ops"].length === 0) return false
+        const validOpTypes = new Set(["insert", "update", "delete"])
+        for (const op of f["ops"] as Array<unknown>) {
+          if (op === null || typeof op !== "object") return false
+          const o = op as Record<string, unknown>
+          if (!validOpTypes.has(o["type"] as string)) return false
+          if (typeof o["key"] !== "string") return false
+          if (o["cols"] !== undefined && (o["cols"] === null || typeof o["cols"] !== "object" || Array.isArray(o["cols"]))) return false
+        }
+        return true
+      }
+      case "call":
+        return isNonEmptyString(f["txId"]) && isNonEmptyString(f["name"])
+      case "fetch":
+        return (
+          isNonEmptyString(f["fetchId"]) &&
+          isNonEmptyString(f["collection"]) &&
+          (f["cursor"] === undefined || (f["cursor"] !== null && typeof f["cursor"] === "object"))
+        )
+      default:
+        return false
+    }
   }
 
   private async dispatch(ws: WebSocket, frame: ClientFrame): Promise<void> {
@@ -277,6 +356,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
    * socket before `committed`.
    */
   private async handleMut(ws: WebSocket, f: Extract<ClientFrame, { t: "mut" }>): Promise<void> {
+    // Inbound limit: reject over-length batches without applying anything
+    // (ADR-0012). Reject-don't-truncate: a partial apply silently drops writes.
+    if (f.ops.length > this.maxOpsPerMutation) {
+      return this.rejectTx(ws, f.txId, `mutation exceeds maxOpsPerMutation (${this.maxOpsPerMutation})`, "LIMIT_EXCEEDED")
+    }
+
     const seen = lookupTx(this.sql, f.txId)
     if (seen) return this.replayReceipt(ws, f.txId, seen)
 
@@ -308,7 +393,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       })
       commitSeq = String(currentSeq(this.sql))
     } catch (e) {
-      return this.rejectTx(ws, f.txId, errorMessage(e))
+      // Log full detail server-side; send only a generic message to the client
+      // (ADR-0012). SQLite constraint strings, column names, and programming-
+      // error text are internal detail — not client API surface. The authorize
+      // catch above is intentionally kept user-facing (README: "throw to deny").
+      console.error(`mutation '${f.collection}' execute failed: ${errorMessage(e)}`)
+      return this.rejectTx(ws, f.txId, "mutation failed", "EXECUTE_FAILED")
     }
 
     recordTx(this.sql, f.txId, true, commitSeq, null, null)
@@ -353,7 +443,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
       if (def.authorize) await def.authorize({ user, args: f.args, sql: this.sql, env: this.env })
       result = await def.execute({ user, args: f.args, sql: this.sql, env: this.env })
     } catch (e) {
-      return this.rejectTx(ws, f.txId, errorMessage(e))
+      // Log full detail server-side; send only a generic message to the client
+      // (ADR-0012). Both authorize and execute errors for commands go through
+      // this path — command authorize errors are NOT currently user-facing API
+      // (unlike mutation authorize, which is "throw to deny"). Log + generic.
+      console.error(`command '${f.name}' failed: ${errorMessage(e)}`)
+      return this.rejectTx(ws, f.txId, "command failed", "EXECUTE_FAILED")
     }
 
     // Serialize the result for dedup replay BEFORE recording success. A
@@ -497,6 +592,17 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     if (!coll) {
       // Unknown collection: drop the subscriber's view. Richer sub-error
       // signalling is deferred; for now reset is the honest minimum.
+      this.send(ws, { t: "reset", sub: frame.subId })
+      return
+    }
+
+    // Per-socket subscription cap (ADR-0012). A re-sub on an existing subId
+    // replaces the old entry (SubscriptionRegistry.add semantics) — count
+    // only new subIds against the cap.
+    const existingCount = this.subs.countFor(ws)
+    const existingSub = this.subs.forWs(ws).find((s) => s.subId === frame.subId)
+    if (!existingSub && existingCount >= this.maxSubsPerSocket) {
+      console.error(`sub '${frame.subId}' refused: maxSubsPerSocket (${this.maxSubsPerSocket}) reached`)
       this.send(ws, { t: "reset", sub: frame.subId })
       return
     }

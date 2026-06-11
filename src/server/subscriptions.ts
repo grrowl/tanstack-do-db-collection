@@ -73,6 +73,11 @@ export class SubscriptionRegistry {
     return Array.from(this.subsByWs.get(ws)?.values() ?? [])
   }
 
+  /** Number of active subscriptions on a single socket — for per-socket cap enforcement. */
+  countFor(ws: WebSocket): number {
+    return this.subsByWs.get(ws)?.size ?? 0
+  }
+
   /** All (ws, sub) pairs subscribed to a collection — for delta fan-out. */
   forCollection(collection: string): Array<{ ws: WebSocket; sub: Sub }> {
     const out: Array<{ ws: WebSocket; sub: Sub }> = []
