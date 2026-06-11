@@ -129,11 +129,20 @@ export class SlowTickDO extends SyncTestDO {
   protected override readonly tickMs = 30_000
 }
 
+/** Same collections as SyncTestDO with tiny inbound limits — lets wire-hardening
+ *  tests (ADR-0012) exercise the limit paths without sending 128+ ops or opening
+ *  256+ subscriptions. */
+export class LimitsTestDO extends SyncTestDO {
+  protected override readonly maxOpsPerMutation = 2
+  protected override readonly maxSubsPerSocket = 2
+}
+
 interface Env {
   TEST_DO: DurableObjectNamespace
   SYNC_DO: DurableObjectNamespace
   MAINT_DO: DurableObjectNamespace
   SLOW_DO: DurableObjectNamespace
+  LIMITS_DO: DurableObjectNamespace
 }
 
 export default {
@@ -150,6 +159,10 @@ export default {
     if (url.pathname.startsWith("/slow/")) {
       const name = url.pathname.slice("/slow/".length) || "default"
       return env.SLOW_DO.get(env.SLOW_DO.idFromName(name)).fetch(req)
+    }
+    if (url.pathname.startsWith("/limits/")) {
+      const name = url.pathname.slice("/limits/".length) || "default"
+      return env.LIMITS_DO.get(env.LIMITS_DO.idFromName(name)).fetch(req)
     }
     return new Response("test-worker")
   },

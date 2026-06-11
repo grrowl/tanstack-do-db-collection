@@ -223,7 +223,10 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
 
   /** Shape-guard: returns true iff `v` is a structurally valid ClientFrame.
    *  (ADR-0012) Runs after decode, before any SQL binding — ensures no
-   *  arbitrary decoded value reaches lookupTx or sql.exec. */
+   *  arbitrary decoded value reaches lookupTx or sql.exec.
+   *
+   *  Optional fields treat null == absent (the client transport serialises
+   *  absent fields as null in MessagePack rather than omitting them). */
   private wellFormed(v: unknown): v is ClientFrame {
     if (v === null || typeof v !== "object") return false
     const f = v as Record<string, unknown>
@@ -231,15 +234,17 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     if (typeof t !== "string") return false
 
     const isNonEmptyString = (x: unknown): x is string => typeof x === "string" && x.length > 0
+    /** null is treated as absent for optional fields */
+    const absent = (x: unknown): boolean => x === undefined || x === null
 
     switch (t) {
       case "sub":
         return (
           isNonEmptyString(f["subId"]) &&
           isNonEmptyString(f["collection"]) &&
-          (f["since"] === undefined || typeof f["since"] === "string") &&
-          (f["limit"] === undefined || typeof f["limit"] === "number") &&
-          (f["offset"] === undefined || typeof f["offset"] === "number")
+          (absent(f["since"]) || typeof f["since"] === "string") &&
+          (absent(f["limit"]) || typeof f["limit"] === "number") &&
+          (absent(f["offset"]) || typeof f["offset"] === "number")
         )
       case "unsub":
         return typeof f["subId"] === "string"
@@ -252,7 +257,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
           const o = op as Record<string, unknown>
           if (!validOpTypes.has(o["type"] as string)) return false
           if (typeof o["key"] !== "string") return false
-          if (o["cols"] !== undefined && (o["cols"] === null || typeof o["cols"] !== "object" || Array.isArray(o["cols"]))) return false
+          if (!absent(o["cols"]) && (typeof o["cols"] !== "object" || Array.isArray(o["cols"]))) return false
         }
         return true
       }
@@ -262,7 +267,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
         return (
           isNonEmptyString(f["fetchId"]) &&
           isNonEmptyString(f["collection"]) &&
-          (f["cursor"] === undefined || (f["cursor"] !== null && typeof f["cursor"] === "object"))
+          (absent(f["cursor"]) || typeof f["cursor"] === "object")
         )
       default:
         return false
