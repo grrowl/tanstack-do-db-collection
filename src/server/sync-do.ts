@@ -204,7 +204,16 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     // wrong structure is dropped + logged. The guard runs BEFORE any SQL
     // binding so no arbitrary decoded value reaches lookupTx or sql.exec.
     if (!this.wellFormed(decoded)) {
-      console.error("malformed frame dropped", JSON.stringify(decoded))
+      // Safe stringify: decoded may contain bigints (MessagePack useBigInt64);
+      // JSON.stringify throws on bigint — use a replacer to avoid crashing the
+      // logging itself.
+      let summary: string
+      try {
+        summary = JSON.stringify(decoded, (_k, v) => (typeof v === "bigint" ? String(v) : v))
+      } catch {
+        summary = String(decoded)
+      }
+      console.error("malformed frame dropped", summary)
       return
     }
 
