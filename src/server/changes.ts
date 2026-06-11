@@ -52,25 +52,30 @@ export function initSchema(sql: SqlStorage): void {
 /**
  * Install AFTER INSERT/UPDATE/DELETE triggers copying change events into
  * `_sync_changes`. Idempotent. `tbl`/`pk` MUST be validated identifiers
- * (the SyncRegistry enforces this) — they are interpolated into DDL.
+ * (the SyncRegistry enforces this via `assertValidCollection`) — they are
+ * interpolated into DDL. Identifiers are double-quoted for consistency with the
+ * rest of the codebase (`sql-compiler.ts`, `ensureTriggers`' DROP), though the
+ * regex gate remains the real safety net. The `'${tbl}'` string literal (the
+ * value inserted into the `tbl` column) stays single-quoted as a value, not an
+ * identifier.
  *
  * Each statement is passed whole: splitting on `;` would sever the inner
  * `INSERT ...;` from its `END`.
  */
 export function installTriggers(sql: SqlStorage, tbl: string, pk: string): void {
   sql.exec(
-    `CREATE TRIGGER IF NOT EXISTS _sync_changes_${tbl}_ai AFTER INSERT ON ${tbl} BEGIN
-       INSERT INTO _sync_changes(tbl,key,op,ts) VALUES ('${tbl}', CAST(NEW.${pk} AS TEXT), 'insert', unixepoch()*1000);
+    `CREATE TRIGGER IF NOT EXISTS "_sync_changes_${tbl}_ai" AFTER INSERT ON "${tbl}" BEGIN
+       INSERT INTO _sync_changes(tbl,key,op,ts) VALUES ('${tbl}', CAST(NEW."${pk}" AS TEXT), 'insert', unixepoch()*1000);
      END`,
   )
   sql.exec(
-    `CREATE TRIGGER IF NOT EXISTS _sync_changes_${tbl}_au AFTER UPDATE ON ${tbl} BEGIN
-       INSERT INTO _sync_changes(tbl,key,op,ts) VALUES ('${tbl}', CAST(NEW.${pk} AS TEXT), 'update', unixepoch()*1000);
+    `CREATE TRIGGER IF NOT EXISTS "_sync_changes_${tbl}_au" AFTER UPDATE ON "${tbl}" BEGIN
+       INSERT INTO _sync_changes(tbl,key,op,ts) VALUES ('${tbl}', CAST(NEW."${pk}" AS TEXT), 'update', unixepoch()*1000);
      END`,
   )
   sql.exec(
-    `CREATE TRIGGER IF NOT EXISTS _sync_changes_${tbl}_ad AFTER DELETE ON ${tbl} BEGIN
-       INSERT INTO _sync_changes(tbl,key,op,ts) VALUES ('${tbl}', CAST(OLD.${pk} AS TEXT), 'delete', unixepoch()*1000);
+    `CREATE TRIGGER IF NOT EXISTS "_sync_changes_${tbl}_ad" AFTER DELETE ON "${tbl}" BEGIN
+       INSERT INTO _sync_changes(tbl,key,op,ts) VALUES ('${tbl}', CAST(OLD."${pk}" AS TEXT), 'delete', unixepoch()*1000);
      END`,
   )
 }
@@ -238,11 +243,6 @@ export function readChangesSince(sql: SqlStorage, cursor: number): Array<ChangeR
       cursor,
     ),
   )
-}
-
-/** Every current row of a collection table — the initial-subscribe snapshot. */
-export function snapshotAll(sql: SqlStorage, tbl: string): Array<Record<string, SqlStorageValue>> {
-  return Array.from(sql.exec<Record<string, SqlStorageValue>>(`SELECT * FROM ${tbl}`))
 }
 
 /** Current rows for a set of keys, for hydrating deltas. `tbl`/`pk` are
