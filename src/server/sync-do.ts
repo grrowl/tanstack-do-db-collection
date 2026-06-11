@@ -26,6 +26,7 @@ import {
   minChangeSeq,
   pruneChanges,
   readChangesSince,
+  readChangesSinceFor,
   setDrainCursor,
 } from "./changes.ts"
 import { Broadcaster } from "./broadcast.ts"
@@ -527,7 +528,7 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     since: number,
     seq: string,
   ): void {
-    const changes = readChangesSince(this.sql, since).filter((c) => c.tbl === coll.table)
+    const changes = readChangesSinceFor(this.sql, coll.table, since)
     const latest = new Map<string, (typeof changes)[number]>()
     for (const c of changes) latest.set(c.key, c)
     const liveKeys = [...latest.values()].filter((c) => c.op !== "delete").map((c) => c.key)
