@@ -215,12 +215,18 @@ describe("wire-hardening (ADR-0012)", () => {
     }
 
     // Collect for a short window — no reply expected (frame was dropped).
+    // This socket has no subscriptions, so the window must be entirely empty:
+    // any frame at all (committed, rejected, or delta) would mean the guard
+    // failed and the oversized payload reached dispatch.
     const droppedFrames = await collectFor(ws, 300)
-    const anyReply = droppedFrames.filter((f) => {
-      const r = f as Extract<ServerFrame, { t: "rejected" }>
-      return f.t === "rejected" && (r as typeof r).txId === "wh-big1"
+    expect(droppedFrames).toHaveLength(0)
+
+    // Server-side confirmation: the row must not have been inserted.
+    const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName("wh-oversize"))
+    const rows = await runInDurableObject(stub, (_i, s) => {
+      return Array.from(s.storage.sql.exec("SELECT COUNT(*) as cnt FROM messages WHERE id='big'"))
     })
-    expect(anyReply).toHaveLength(0)
+    expect((rows[0] as { cnt: number }).cnt).toBe(0)
 
     // Socket survives: a normal mut succeeds.
     send(ws, {
