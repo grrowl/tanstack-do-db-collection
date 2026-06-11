@@ -155,6 +155,21 @@ export class WebSocketTransport {
         this.resubscribeAll()
       }
     })()
+    // A socket that never OPENED fires no close event, so the close-handler
+    // recovery path (above) can't run. Clear the cached rejection so the next
+    // connect() starts fresh, and re-arm the timer while subscriptions are
+    // live — otherwise one unreachable attempt wedges the transport forever.
+    this.connectPromise.catch(() => {
+      this.connectPromise = null
+      if (!this.intentionallyClosed && this.handlers.size > 0) {
+        this.reconnecting = true
+        setTimeout(() => {
+          void this.connect().catch(() => {
+            /* next attempt retries on the following close */
+          })
+        }, this.reconnectDelayMs)
+      }
+    })
     return this.connectPromise
   }
 
