@@ -8,6 +8,10 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.1] — 2026-06-11
+
 ### Fixed
 
 - **Catch-up reinsert no longer wedges the client.** A key deleted-and-
