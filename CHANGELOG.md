@@ -8,6 +8,15 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.4.0-dev.0] — 2026-06-11
+
+Prerelease on the `dev` dist-tag (`npm i tanstack-do-db-collection@dev`); does
+not affect `latest` (0.3.1). The SSR adapter installs and imports against a
+released `@tanstack/db`, but is **dormant until paired with the PR #1564 build**
+(`dehydrate`/`hydrate`/`DbClient` and the hook calls are upstream and unreleased).
+
 ### Added
 
 - **SSR support (experimental — ADR-0011; tracks TanStack DB draft PR
