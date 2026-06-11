@@ -88,6 +88,12 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
           .defineCommand({
             name: "echo",
             execute: ({ args }) => ({ echoed: args }),
+          })
+          .defineCommand({
+            name: "boom",
+            execute: () => {
+              throw new Error("command boom")
+            },
           }),
       )
     })
