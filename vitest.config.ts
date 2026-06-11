@@ -24,6 +24,7 @@ export default defineWorkersProject({
             UNREG_DO: { className: "UnregisteredDO", useSQLite: true },
             MAINT_DO: { className: "MaintTestDO", useSQLite: true },
             SLOW_DO: { className: "SlowTickDO", useSQLite: true },
+            LIMITS_DO: { className: "LimitsTestDO", useSQLite: true },
           },
         },
       },

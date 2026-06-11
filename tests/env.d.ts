@@ -7,5 +7,6 @@ declare module "cloudflare:test" {
     UNREG_DO: DurableObjectNamespace
     MAINT_DO: DurableObjectNamespace
     SLOW_DO: DurableObjectNamespace
+    LIMITS_DO: DurableObjectNamespace
   }
 }
