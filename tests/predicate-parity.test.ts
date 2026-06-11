@@ -149,7 +149,7 @@ async function deltaMembers(room: string, where: unknown): Promise<Array<string>
 
     // The always-emit rule (ADR-0002 C4): every changed key gets a `d` frame,
     // either insert/update (member) or delete (non-member). If no `d` arrives,
-    // that's a protocol deviation — the assertion below surfaces it.
+    // that's a protocol deviation — currently silent here; see STOP condition in plan 003.
     const delta = frames.find(
       (f): f is Extract<ServerFrame, { t: "d" }> => f.t === "d" && (f.key as string) === seed.id,
     )
@@ -257,12 +257,18 @@ describe("SQL/JS predicate parity (plan 003)", () => {
   // JS: toBooleanPredicate(null) → false → excluded too.
   // VERIFIED PASSING — both paths agree: snap=["lo","up","x"] delta=["lo","up","x"].
   // (Note: string comparison in both paths; "HELLO" and "hello" are > "a" in both.)
+  // Also verifies the explicit `body: null` spelling on the delta path produces the
+  // same membership as omitting `body` — both spellings must agree (plan 003 step 2).
   it("gt: NULL body excluded on both paths (SQL three-valued logic)", async () => {
     const where = fn("gt", ref("body"), val("a"))
     const snap = await snapshotMembers("pp-gt-snap", where)
     const delta = await deltaMembers("pp-gt-delta", where)
+    const deltaExplicit = await deltaMembersExplicitNull("pp-gt-delta-explicit", where)
 
     expect(snap, `gt: snapshot vs delta mismatch — snap=${snap} delta=${delta}`).toEqual(delta)
+    expect(delta, `gt: omit-null vs explicit-null spelling mismatch — omit=${delta} explicit=${deltaExplicit}`).toEqual(
+      deltaExplicit,
+    )
   })
 
   // Case 5: not(eq(body, "x"))
@@ -270,12 +276,18 @@ describe("SQL/JS predicate parity (plan 003)", () => {
   // JS: toBooleanPredicate wraps the outer call — compileSingleRowExpression for
   //   not(eq(body,"x")) returns null for null body, and toBooleanPredicate(null) → false.
   // VERIFIED PASSING — both paths agree: snap=["lo","up"] delta=["lo","up"].
+  // Also verifies the explicit `body: null` spelling on the delta path produces the
+  // same membership as omitting `body` — both spellings must agree (plan 003 step 2).
   it("not(eq): NULL body excluded under three-valued NOT", async () => {
     const where = fn("not", fn("eq", ref("body"), val("x")))
     const snap = await snapshotMembers("pp-not-snap", where)
     const delta = await deltaMembers("pp-not-delta", where)
+    const deltaExplicit = await deltaMembersExplicitNull("pp-not-delta-explicit", where)
 
     expect(snap, `not(eq): snapshot vs delta mismatch — snap=${snap} delta=${delta}`).toEqual(delta)
+    expect(delta, `not(eq): omit-null vs explicit-null spelling mismatch — omit=${delta} explicit=${deltaExplicit}`).toEqual(
+      deltaExplicit,
+    )
   })
 
   // Case 6: in(body, ["hello", "x"])
@@ -283,11 +295,17 @@ describe("SQL/JS predicate parity (plan 003)", () => {
   // JS: [].includes(null) → false → excluded (consistent with SQL).
   // Also: "HELLO" not in the list → up excluded. Only lo and x included.
   // VERIFIED PASSING — both paths agree: snap=["lo","x"] delta=["lo","x"].
+  // Also verifies the explicit `body: null` spelling on the delta path produces the
+  // same membership as omitting `body` — both spellings must agree (plan 003 step 2).
   it("in: NULL body excluded, exact match only (no case folding)", async () => {
     const where = fn("in", ref("body"), val(["hello", "x"]))
     const snap = await snapshotMembers("pp-in-snap", where)
     const delta = await deltaMembers("pp-in-delta", where)
+    const deltaExplicit = await deltaMembersExplicitNull("pp-in-delta-explicit", where)
 
     expect(snap, `in: snapshot vs delta mismatch — snap=${snap} delta=${delta}`).toEqual(delta)
+    expect(delta, `in: omit-null vs explicit-null spelling mismatch — omit=${delta} explicit=${deltaExplicit}`).toEqual(
+      deltaExplicit,
+    )
   })
 })
