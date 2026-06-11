@@ -175,13 +175,16 @@ describe("mutation error paths (atomicity, fail-loud, exactly-once)", () => {
 })
 
 describe("command error paths", () => {
-  it("command execute throws → rejected with message", async () => {
+  it("command execute throws → rejected with generic message, detail not leaked", async () => {
     const ws = await openWs("/sync/err-cmd-boom")
     send(ws, { t: "call", txId: "c1", name: "boom", args: {} })
     const frames = await collectUntil(ws, (f) => f.t === "rejected" || f.t === "committed")
     const last = frames[frames.length - 1]! as Extract<ServerFrame, { t: "rejected" }>
     expect(last.t).toBe("rejected")
-    expect(last.error.message).toMatch(/command boom/)
+    // execute errors are sanitized — internal detail must NOT reach the client (ADR-0012)
+    expect(last.error.message).toBe("command failed")
+    expect(last.error.code).toBe("EXECUTE_FAILED")
+    expect(last.error.message).not.toMatch(/boom/)
     ws.close()
   })
 
