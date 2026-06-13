@@ -2,10 +2,18 @@
 // `where` plus orderBy/limit/offset into a parameterised SELECT, so subset
 // shaping runs in SQLite rather than scanning every row in memory.
 //
-// Supported operator floor (D6): eq, ne, gt, gte, lt, lte, like, in, and, or,
-// not. Anything outside it — ilike, isNull, functional/nested-path predicates —
-// throws UnsupportedPredicateError. The caller rejects such a subscription
-// rather than silently falling back to a full scan (fail loud).
+// Supported operator floor (D6): eq, gt, gte, lt, lte, like, in, and, or,
+// not. Anything outside it — ne, ilike, isNull, functional/nested-path
+// predicates — throws UnsupportedPredicateError. The caller rejects such a
+// subscription rather than silently falling back to a full scan (fail loud).
+//
+// The floor is exactly the set of operators that the SQL snapshot path and
+// @tanstack/db's JS evaluator (delta/catch-up path) agree on, row-for-row —
+// see ADR-0013. `ne` is excluded because @tanstack/db has no `ne` (it only
+// knows `not(eq(...))`); accepting it here desynced the two paths and crashed
+// the delta path. `like` stays in the floor but is only correct because the DO
+// sets `PRAGMA case_sensitive_like = ON` (SyncDurableObject constructor), which
+// makes SQLite LIKE case-sensitive to match @tanstack/db's case-sensitive `like`.
 
 export class UnsupportedPredicateError extends Error {
   constructor(message: string) {
@@ -17,11 +25,12 @@ export class UnsupportedPredicateError extends Error {
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 const COMPARATORS: Record<string, string> = {
   eq: "=",
-  ne: "!=",
   gt: ">",
   gte: ">=",
   lt: "<",
   lte: "<=",
+  // LIKE is case-sensitive only because the DO sets PRAGMA case_sensitive_like
+  // = ON; see the floor note above and ADR-0013.
   like: "LIKE",
 }
 
@@ -60,6 +69,17 @@ function compileExpr(node: unknown, params: Array<unknown>): string {
 
   if (name in COMPARATORS) {
     if (args.length !== 2) throw new UnsupportedPredicateError(`'${name}' expects 2 arguments`)
+    if (name === "like") {
+      // @tanstack/db's evaluateLike returns false unless BOTH operands are
+      // strings, whereas SQLite LIKE coerces a non-string pattern (e.g. 123 →
+      // '123') and could match rows the JS delta/catch-up path rejects. Restrict
+      // the pattern to a string literal so the two paths stay in lockstep — the
+      // floor must be verified-agreeing, not merely "usually agreeing" (ADR-0013).
+      const lit = args[1]
+      if (!isNode(lit) || lit.type !== "val" || typeof lit.value !== "string") {
+        throw new UnsupportedPredicateError("'like' pattern must be a string literal")
+      }
+    }
     return `${column(args[0])} ${COMPARATORS[name]} ${literal(args[1], params)}`
   }
   if (name === "and" || name === "or") {
@@ -84,7 +104,7 @@ function compileExpr(node: unknown, params: Array<unknown>): string {
   }
   throw new UnsupportedPredicateError(
     `operator '${name}' is not supported for server-side filtering ` +
-      `(floor: eq, ne, gt, gte, lt, lte, like, in, and, or, not)`,
+      `(floor: eq, gt, gte, lt, lte, like, in, and, or, not)`,
   )
 }
 
