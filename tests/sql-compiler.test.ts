@@ -18,6 +18,13 @@ describe("IR -> SQL compiler (M6)", () => {
     expect(compileWhere(fn("like", ref("body"), val("h%")))).toEqual({ sql: `"body" LIKE ?`, params: ["h%"] })
   })
 
+  it("rejects a non-string `like` pattern (SQL would coerce, @tanstack/db would not — ADR-0013)", () => {
+    // SQLite LIKE coerces 123 → '123' and could match; the JS evaluator returns
+    // false for a non-string pattern. Reject so the two paths can't diverge.
+    expect(() => compileWhere(fn("like", ref("body"), val(123)))).toThrow(/pattern must be a string/)
+    expect(() => compileWhere(fn("like", ref("body"), val(null)))).toThrow(UnsupportedPredicateError)
+  })
+
   it("compiles and/or/not with grouping", () => {
     const e = fn("and", fn("gt", ref("n"), val(5)), fn("not", fn("eq", ref("k"), val("z"))))
     expect(compileWhere(e)).toEqual({ sql: `("n" > ? AND (NOT "k" = ?))`, params: [5, "z"] })
@@ -34,10 +41,22 @@ describe("IR -> SQL compiler (M6)", () => {
     expect(compileWhere(fn("in", ref("id"), val([])))).toEqual({ sql: `0`, params: [] })
   })
 
-  it("rejects operators outside the floor (ilike, isNull, functions)", () => {
+  it("rejects operators outside the floor (ne, ilike, isNull, functions)", () => {
+    // `ne` was removed from the floor (ADR-0013): @tanstack/db's evaluator has no
+    // `ne` (only `not(eq(...))`), so accepting it in SQL desynced the snapshot and
+    // delta paths. It must now be rejected like any other off-floor operator.
+    expect(() => compileWhere(fn("ne", ref("body"), val("x")))).toThrow(UnsupportedPredicateError)
     expect(() => compileWhere(fn("ilike", ref("body"), val("x")))).toThrow(UnsupportedPredicateError)
     expect(() => compileWhere(fn("isNull", ref("body")))).toThrow(UnsupportedPredicateError)
     expect(() => compileWhere(fn("upper", ref("body")))).toThrow(/not supported/)
+  })
+
+  it("the supported 'not equal' is not(eq(...)), which lowers correctly", () => {
+    // The canonical not-equal a @tanstack/db client emits — both floors agree on it.
+    expect(compileWhere(fn("not", fn("eq", ref("body"), val("x"))))).toEqual({
+      sql: `(NOT "body" = ?)`,
+      params: ["x"],
+    })
   })
 
   it("rejects nested/aliased column paths", () => {

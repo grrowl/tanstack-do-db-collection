@@ -10,6 +10,31 @@ While pre-1.0, the public API may change between 0.x releases.
 
 _Nothing yet._
 
+## [0.3.3] — 2026-06-13
+
+### Fixed
+
+- **A filtered subscription's membership no longer depends on which path
+  decided it (ADR-0013).** The SQL snapshot and the JS delta/catch-up evaluators
+  disagreed on two operators, so two clients could see different rows for the
+  same `where` depending on connection timing:
+  - **`ne` crashed the delta path and hung the client.** The SQL floor accepted
+    `ne` but `@tanstack/db`'s evaluator has no `ne` (not-equal is `not(eq(...))`);
+    its compile error escaped `handleSub` uncaught, so no `reset` was sent. `ne`
+    is now off the floor and rejected with `reset` like any unsupported operator,
+    and a defensive guard turns any predicate-compile failure into a `reset`
+    rather than a hang. Use `not(eq(...))` for not-equal (unchanged for real
+    clients).
+  - **`like` was case-insensitive in the snapshot but case-sensitive in deltas.**
+    The DO now sets `PRAGMA case_sensitive_like = ON`, making SQLite `LIKE` match
+    `@tanstack/db`'s case-sensitive `like` on every path. (#17)
+
+### Changed
+
+- **Operator floor for server-side filtering dropped `ne`** — it is now
+  `eq, gt, gte, lt, lte, like, in, and, or, not`, exactly the set the SQL and JS
+  evaluators agree on row-for-row. `like` is now case-sensitive. (#17)
+
 ## [0.3.2] — 2026-06-13
 
 ### Added

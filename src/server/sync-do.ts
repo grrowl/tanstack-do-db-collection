@@ -33,7 +33,7 @@ import { Broadcaster } from "./broadcast.ts"
 import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx, sweepDedup } from "./dedup.ts"
 import type { SyncRegistry } from "./registry.ts"
 import { andPredicates, compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
-import { SubscriptionRegistry } from "./subscriptions.ts"
+import { SubscriptionRegistry, type Sub } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
   /** Set by `registerSync` — the collections/mutations/commands this DO serves. */
@@ -88,6 +88,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     super(ctx, env)
     // Auto-pong via the runtime: survives hibernation, no per-message billing.
     this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"))
+    // Make SQLite LIKE case-sensitive so the SQL snapshot path matches
+    // @tanstack/db's case-sensitive `like` evaluator on the delta path — the
+    // single source of truth for filtered-subscription membership (ADR-0013).
+    // Connection-scoped pragma; re-applied on every instantiation, including a
+    // hibernation wake (same lifecycle as the auto-response registration above).
+    this.sql.exec("PRAGMA case_sensitive_like = ON")
     // Restore the live-socket set after a hibernation wake.
     for (const ws of this.ctx.getWebSockets()) this.liveWs.add(ws)
     this.broadcaster = new Broadcaster((ws, frame) => this.send(ws, frame), this.tickMs)
@@ -609,7 +615,23 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     // before the tick loses the write (reconnect resumes past it).
     this.broadcaster.flushOne(ws)
 
-    const sub = this.subs.add(ws, frame.subId, frame.collection, frame.where)
+    // Registering compiles the predicate in @tanstack/db's evaluator. If the
+    // predicate is outside the JS floor (e.g. an operator the SQL floor somehow
+    // let through), that throws UnsupportedPredicateError — reject with `reset`
+    // rather than letting it escape uncaught and hang the client (ADR-0013).
+    // With the floors aligned this is belt-and-suspenders, but it must hold for
+    // any future operator added to one floor and not the other.
+    let sub: Sub
+    try {
+      sub = this.subs.add(ws, frame.subId, frame.collection, frame.where)
+    } catch (e) {
+      if (e instanceof UnsupportedPredicateError) {
+        console.error(`sub '${frame.subId}' on '${frame.collection}' rejected: ${e.message}`)
+        this.send(ws, { t: "reset", sub: frame.subId })
+        return
+      }
+      throw e
+    }
     const seq = String(currentSeq(this.sql))
 
     // Reconnect catch-up: a `since` cursor asks for changes after that point

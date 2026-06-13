@@ -7,6 +7,7 @@
 // client's operator semantics exactly (no second predicate implementation).
 
 import { compileSingleRowExpression, toBooleanPredicate } from "@tanstack/db"
+import { UnsupportedPredicateError } from "./sql-compiler.ts"
 
 export interface Sub {
   subId: string
@@ -19,9 +20,20 @@ export interface Sub {
 
 function compilePredicate(where: unknown): (row: Record<string, unknown>) => boolean {
   if (where === undefined || where === null) return () => true
-  const evaluate = compileSingleRowExpression(where as never) as (
-    row: Record<string, unknown>,
-  ) => boolean | null
+  let evaluate: (row: Record<string, unknown>) => boolean | null
+  try {
+    evaluate = compileSingleRowExpression(where as never) as (row: Record<string, unknown>) => boolean | null
+  } catch (e) {
+    // @tanstack/db's evaluator rejects any operator outside its registry (e.g. a
+    // hand-built `ne`, which it does not know — only `not(eq(...))`). The SQL
+    // snapshot floor (sql-compiler.ts) and this JS delta floor MUST be the same
+    // set, or a sub's membership depends on which path decided it. Re-throw as
+    // UnsupportedPredicateError so handleSub rejects the sub with a `reset`
+    // (fail loud) instead of letting this escape uncaught and hang the client. (ADR-0013)
+    throw new UnsupportedPredicateError(
+      `predicate not compilable by @tanstack/db evaluator: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
   // toBooleanPredicate collapses SQL 3-valued null to false, matching SQL.
   return (row) => toBooleanPredicate(evaluate(row))
 }
