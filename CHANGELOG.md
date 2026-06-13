@@ -10,6 +10,42 @@ While pre-1.0, the public API may change between 0.x releases.
 
 _Nothing yet._
 
+## [0.3.2] — 2026-06-13
+
+### Added
+
+- **Wire-input hardening at the server boundary (ADR-0012).** Frame-shape
+  guards drop malformed frames — the socket survives and answers the next
+  valid frame — and inbound limits bound frame size and per-connection
+  subscription count. (#15)
+
+### Fixed
+
+- **A failed initial connect no longer wedges the client transport.** A
+  WebSocket that never `open()`s fires no `close` event, so the auto-reconnect
+  couldn't run and the cached rejected `connectPromise` wedged the transport
+  permanently — every later `connect()` returned the same rejection. On a
+  failed open the transport now clears the promise and re-arms the reconnect
+  while subscriptions are live. (#12)
+
+### Changed
+
+- **Reconnect catch-up no longer issues an N+1.** Delta hydration batches
+  keyed reads in chunks (≤64) and the per-table changelog read uses the
+  `(tbl, seq)` composite index, so a 500-key catch-up issues ~8 queries
+  instead of 500. Behavior is unchanged. (#14)
+
+### Security
+
+- **Mutation `execute` errors are sanitized.** A failed `execute` now returns a
+  generic "mutation failed" rather than leaking SQLite/internal detail to the
+  client; authorize errors still pass through. (#15)
+
+### Internal
+
+- Server error-path and wire-level test coverage expanded (#11); dead
+  `snapshotAll` removed and CDC trigger DDL identifiers quoted (#13).
+
 ## [0.3.1] — 2026-06-11
 
 ### Fixed
