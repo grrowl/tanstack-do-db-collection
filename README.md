@@ -37,10 +37,24 @@ takes the third path — the DO is the source of truth, and the entire
 client-side reactive layer (live queries, incremental view maintenance,
 optimistic rollback) comes from TanStack DB for free.
 
+The result is a sync engine that leans on the platform instead of working
+around it. Hibernatable WebSockets and the DO's own SQLite do the heavy
+lifting, so there's no document engine to hold warm in memory and no external
+store to mirror — the DO sleeps when quiet, wakes on a frame, and a reconnect
+catches up from one cursor rather than re-snapshotting. For the common case —
+app data with optimistic CRUD, a clear writer, and authorization gated per
+scope — that makes it the lighter, more Cloudflare-native default. Reach for a
+CRDT engine when you genuinely need offline-converging collaborative
+*documents*; reach for this when you need a fast, authoritative collection that
+syncs.
+
 | | This library |
 |---|---|
 | **Source of truth** | The Durable Object's own SQLite. No Postgres, no external sync service. |
-| **Transport** | One WebSocket per DO. Hibernation-native. |
+| **Transport** | One WebSocket per DO, multiplexing every collection over a single ordered stream. |
+| **Idle cost** | Fully hibernates. No in-memory document and no idle timers — the DO sleeps between messages and bills nothing while quiet, with the runtime answering pings on its behalf. |
+| **Reconnect** | Windowed catch-up from one cursor — the deltas since your last applied position, not a re-snapshot. (A reconnect from beyond the retention window gets a fresh snapshot instead.) |
+| **Footprint** | Light on the wire — one binary MessagePack stream, deltas coalesced to last-write-wins per key, no second ack channel — and in memory: SQLite plus a coalescer, no CRDT document to keep warm, no server-side views. |
 | **Writes** | Bidirectional. Optimistic on the client; authoritative in the DO. |
 | **Confirmation** | A position in the one stream the client already tails — no second ack channel. |
 | **Reads** | Live queries via TanStack DB's client-side IVM. The DO never joins or aggregates. |
