@@ -15,6 +15,13 @@ interface Claims {
   userId: string
 }
 
+interface Message {
+  id: string
+  author: string
+  content: string
+  created_at: number
+}
+
 export class SessionDO extends SyncDurableObject<Env, Claims> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -27,19 +34,19 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
         created_at INTEGER NOT NULL
       )`)
       this.registerSync(
-        new SyncRegistry<Claims>()
+        new SyncRegistry<Claims, Env, { messages: Message }>()
           .defineCollection({ table: "messages", pk: "id" })
           .defineMutation({
             collection: "messages",
             type: "insert",
             // Only let a client write messages authored by itself.
             authorize: ({ user, op }) => {
-              if ((op.cols as { author: string }).author !== user.userId) {
+              if (op.cols.author !== user.userId) {
                 throw new Error("author must match the connected user")
               }
             },
             execute: ({ op, sql }) => {
-              const c = op.cols as { id: string; author: string; content: string; created_at: number }
+              const c = op.cols
               sql.exec(
                 "INSERT INTO messages(id, author, content, created_at) VALUES (?, ?, ?, ?)",
                 c.id,
