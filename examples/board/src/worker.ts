@@ -20,6 +20,13 @@ interface Env {
 interface Claims {
   userId: string
 }
+interface Task {
+  id: string
+  title: string
+  status: string
+  votes: number
+  updated_at: number
+}
 
 const UPDATABLE = new Set(["title", "status", "votes", "updated_at"])
 
@@ -35,13 +42,13 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
         updated_at INTEGER NOT NULL
       )`)
       this.registerSync(
-        new SyncRegistry<Claims>()
+        new SyncRegistry<Claims, Env, { tasks: Task }>()
           .defineCollection({ table: "tasks", pk: "id" })
           .defineMutation({
             collection: "tasks",
             type: "insert",
             execute: ({ op, sql }) => {
-              const c = op.cols as { id: string; title: string; status: string; votes: number; updated_at: number }
+              const c = op.cols
               sql.exec(
                 "INSERT INTO tasks(id, title, status, votes, updated_at) VALUES (?, ?, ?, ?, ?)",
                 c.id,
@@ -62,14 +69,14 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
               const keys = Object.keys(cols).filter((k) => UPDATABLE.has(k))
               if (keys.length === 0) return
               const set = keys.map((k) => `"${k}" = ?`).join(", ")
-              sql.exec(`UPDATE tasks SET ${set} WHERE id = ?`, ...keys.map((k) => cols[k]), op.key as string)
+              sql.exec(`UPDATE tasks SET ${set} WHERE id = ?`, ...keys.map((k) => cols[k]), op.key)
             },
           })
           .defineMutation({
             collection: "tasks",
             type: "delete",
             execute: ({ op, sql }) => {
-              sql.exec("DELETE FROM tasks WHERE id = ?", op.key as string)
+              sql.exec("DELETE FROM tasks WHERE id = ?", op.key)
             },
           }),
       )

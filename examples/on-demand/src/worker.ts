@@ -11,6 +11,12 @@ interface Env {
 interface Claims {
   userId: string
 }
+interface Item {
+  id: string
+  category: string
+  text: string
+  created_at: number
+}
 
 const SEED: ReadonlyArray<readonly [string, string, string]> = [
   ["a1", "A", "Apple one"],
@@ -30,13 +36,13 @@ export class ItemsDO extends SyncDurableObject<Env, Claims> {
         created_at INTEGER NOT NULL
       )`)
       this.registerSync(
-        new SyncRegistry<Claims>()
+        new SyncRegistry<Claims, Env, { items: Item }>()
           .defineCollection({ table: "items", pk: "id" })
           .defineMutation({
             collection: "items",
             type: "insert",
             execute: ({ op, sql }) => {
-              const c = op.cols as { id: string; category: string; text: string; created_at: number }
+              const c = op.cols
               sql.exec(
                 "INSERT INTO items(id, category, text, created_at) VALUES (?, ?, ?, ?)",
                 c.id,
