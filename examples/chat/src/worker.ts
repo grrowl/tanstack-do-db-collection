@@ -4,7 +4,7 @@
 // the real code with no build step for the lib. A published consumer would
 // instead `import { ... } from "tanstack-do-db-collection"`.
 
-import { SyncRegistry, SyncDurableObject } from "../../../src/server/index.ts"
+import { defineSync, SyncDurableObject } from "../../../src/server/index.ts"
 
 interface Env {
   SESSION_DO: DurableObjectNamespace
@@ -22,6 +22,56 @@ interface Message {
   created_at: number
 }
 
+// `defineSync` binds identity (Claims) and binding-env (Env) once; the helpers
+// it returns flow those types into every handler ctx.
+const sync = defineSync<Claims, Env>()
+
+const chatSchema = sync.schema({
+  collections: {
+    // The collection KEY is the table name (ADR-0007: sole TEXT, client pk).
+    messages: sync.collection<Message>({
+      pk: "id",
+      mutations: {
+        insert: {
+          // Only let a client write messages authored by itself.
+          authorize: ({ user, op }) => {
+            if (op.cols.author !== user.userId) {
+              throw new Error("author must match the connected user")
+            }
+          },
+          execute: ({ op, sql }) => {
+            const c = op.cols
+            sql.exec(
+              "INSERT INTO messages(id, author, content, created_at) VALUES (?, ?, ?, ?)",
+              c.id,
+              c.author,
+              c.content,
+              c.created_at,
+            )
+          },
+        },
+      },
+    }),
+  },
+  commands: {
+    // A COMMAND (not a mutation): "clear the room" isn't a single typed row
+    // write, so it can't be insert/update/delete. A command is the escape hatch
+    // — it runs outside the optimistic path, can return a result, and (the part
+    // worth seeing) its own SQL writes still flow through the CDC triggers, so
+    // the DELETE fans out to every connected tab as ordinary delete deltas. The
+    // collection empties live for everyone, and the caller gets the count back
+    // on `committed`.
+    clearRoom: sync.command()(({ sql }) => {
+      const before = Array.from(sql.exec("SELECT count(*) AS c FROM messages"))[0]!.c as number
+      sql.exec("DELETE FROM messages")
+      return { deleted: before }
+    }),
+  },
+})
+
+// The client type-only imports this to type its transport + collections.
+export type ChatApi = typeof chatSchema
+
 export class SessionDO extends SyncDurableObject<Env, Claims> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -33,30 +83,7 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
         content    TEXT NOT NULL,
         created_at INTEGER NOT NULL
       )`)
-      this.registerSync(
-        new SyncRegistry<Claims, Env, { messages: Message }>()
-          .defineCollection({ table: "messages", pk: "id" })
-          .defineMutation({
-            collection: "messages",
-            type: "insert",
-            // Only let a client write messages authored by itself.
-            authorize: ({ user, op }) => {
-              if (op.cols.author !== user.userId) {
-                throw new Error("author must match the connected user")
-              }
-            },
-            execute: ({ op, sql }) => {
-              const c = op.cols
-              sql.exec(
-                "INSERT INTO messages(id, author, content, created_at) VALUES (?, ?, ?, ?)",
-                c.id,
-                c.author,
-                c.content,
-                c.created_at,
-              )
-            },
-          }),
-      )
+      this.registerSync(chatSchema)
     })
   }
 

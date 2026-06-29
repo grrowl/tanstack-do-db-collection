@@ -11,7 +11,7 @@
 // `/bump` is a server-side load generator — it mutates random tasks (likely cold
 // ones the caller never loaded) and broadcasts, so the OTHER tab sees move-in.
 
-import { SyncRegistry, SyncDurableObject } from "../../../src/server/index.ts"
+import { defineSync, SyncDurableObject } from "../../../src/server/index.ts"
 
 interface Env {
   BOARD_DO: DurableObjectNamespace
@@ -30,6 +30,49 @@ interface Task {
 
 const UPDATABLE = new Set(["title", "status", "votes", "updated_at"])
 
+const sync = defineSync<Claims, Env>()
+
+const boardSchema = sync.schema({
+  collections: {
+    tasks: sync.collection<Task>({
+      pk: "id",
+      mutations: {
+        insert: {
+          execute: ({ op, sql }) => {
+            const c = op.cols
+            sql.exec(
+              "INSERT INTO tasks(id, title, status, votes, updated_at) VALUES (?, ?, ?, ?, ?)",
+              c.id,
+              c.title,
+              c.status,
+              c.votes,
+              c.updated_at,
+            )
+          },
+        },
+        // A vote/edit sends a getChanges() diff — any of title/status/votes
+        // plus the bumped updated_at. Build the SET from the present keys.
+        update: {
+          execute: ({ op, sql }) => {
+            const cols = op.cols as Record<string, unknown>
+            const keys = Object.keys(cols).filter((k) => UPDATABLE.has(k))
+            if (keys.length === 0) return
+            const set = keys.map((k) => `"${k}" = ?`).join(", ")
+            sql.exec(`UPDATE tasks SET ${set} WHERE id = ?`, ...keys.map((k) => cols[k]), op.key)
+          },
+        },
+        delete: {
+          execute: ({ op, sql }) => {
+            sql.exec("DELETE FROM tasks WHERE id = ?", op.key)
+          },
+        },
+      },
+    }),
+  },
+})
+
+export type BoardApi = typeof boardSchema
+
 export class BoardDO extends SyncDurableObject<Env, Claims> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -41,45 +84,7 @@ export class BoardDO extends SyncDurableObject<Env, Claims> {
         votes      INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )`)
-      this.registerSync(
-        new SyncRegistry<Claims, Env, { tasks: Task }>()
-          .defineCollection({ table: "tasks", pk: "id" })
-          .defineMutation({
-            collection: "tasks",
-            type: "insert",
-            execute: ({ op, sql }) => {
-              const c = op.cols
-              sql.exec(
-                "INSERT INTO tasks(id, title, status, votes, updated_at) VALUES (?, ?, ?, ?, ?)",
-                c.id,
-                c.title,
-                c.status,
-                c.votes,
-                c.updated_at,
-              )
-            },
-          })
-          .defineMutation({
-            collection: "tasks",
-            type: "update",
-            // A vote/edit sends a getChanges() diff — any of title/status/votes
-            // plus the bumped updated_at. Build the SET from the present keys.
-            execute: ({ op, sql }) => {
-              const cols = op.cols as Record<string, unknown>
-              const keys = Object.keys(cols).filter((k) => UPDATABLE.has(k))
-              if (keys.length === 0) return
-              const set = keys.map((k) => `"${k}" = ?`).join(", ")
-              sql.exec(`UPDATE tasks SET ${set} WHERE id = ?`, ...keys.map((k) => cols[k]), op.key)
-            },
-          })
-          .defineMutation({
-            collection: "tasks",
-            type: "delete",
-            execute: ({ op, sql }) => {
-              sql.exec("DELETE FROM tasks WHERE id = ?", op.key)
-            },
-          }),
-      )
+      this.registerSync(boardSchema)
     })
   }
 

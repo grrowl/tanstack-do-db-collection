@@ -8,23 +8,17 @@ import { useState } from "react"
 import { createRoot } from "react-dom/client"
 import { ulid } from "ulid"
 import { doCollectionOptions, WebSocketTransport } from "../../../src/client/index.ts"
-
-interface Item {
-  id: string
-  category: string
-  text: string
-  created_at: number
-}
+import type { ItemsApi } from "./worker.ts"
 
 const CATEGORIES = ["A", "B", "C"]
 const room = new URLSearchParams(location.search).get("room") ?? "demo"
 const wsProto = location.protocol === "https:" ? "wss:" : "ws:"
-const transport = new WebSocketTransport({
+const transport = new WebSocketTransport<ItemsApi>({
   url: `${wsProto}//${location.host}/sync?room=${encodeURIComponent(room)}`,
 })
 
 const items = createCollection(
-  doCollectionOptions<Item>({ transport, table: "items", getKey: (i) => i.id, syncMode: "on-demand" }),
+  doCollectionOptions<ItemsApi, "items">({ transport, table: "items", getKey: (i) => i.id, syncMode: "on-demand" }),
 )
 
 // Mounting requests this category's subset; unmounting releases it.

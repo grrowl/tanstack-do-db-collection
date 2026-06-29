@@ -2,7 +2,7 @@
 // A GET /seed?room=… endpoint inserts fixed rows so subsets have pre-existing
 // data to load (demonstrating loadSubset fetching, not just live inserts).
 
-import { SyncRegistry, SyncDurableObject } from "../../../src/server/index.ts"
+import { defineSync, SyncDurableObject } from "../../../src/server/index.ts"
 
 interface Env {
   ITEMS_DO: DurableObjectNamespace
@@ -25,6 +25,32 @@ const SEED: ReadonlyArray<readonly [string, string, string]> = [
   ["c1", "C", "Cherry one"],
 ]
 
+const sync = defineSync<Claims, Env>()
+
+const itemsSchema = sync.schema({
+  collections: {
+    items: sync.collection<Item>({
+      pk: "id",
+      mutations: {
+        insert: {
+          execute: ({ op, sql }) => {
+            const c = op.cols
+            sql.exec(
+              "INSERT INTO items(id, category, text, created_at) VALUES (?, ?, ?, ?)",
+              c.id,
+              c.category,
+              c.text,
+              c.created_at,
+            )
+          },
+        },
+      },
+    }),
+  },
+})
+
+export type ItemsApi = typeof itemsSchema
+
 export class ItemsDO extends SyncDurableObject<Env, Claims> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env)
@@ -35,24 +61,7 @@ export class ItemsDO extends SyncDurableObject<Env, Claims> {
         text       TEXT NOT NULL,
         created_at INTEGER NOT NULL
       )`)
-      this.registerSync(
-        new SyncRegistry<Claims, Env, { items: Item }>()
-          .defineCollection({ table: "items", pk: "id" })
-          .defineMutation({
-            collection: "items",
-            type: "insert",
-            execute: ({ op, sql }) => {
-              const c = op.cols
-              sql.exec(
-                "INSERT INTO items(id, category, text, created_at) VALUES (?, ?, ?, ?)",
-                c.id,
-                c.category,
-                c.text,
-                c.created_at,
-              )
-            },
-          }),
-      )
+      this.registerSync(itemsSchema)
     })
   }
 
