@@ -21,7 +21,6 @@ export type {
   InsertOp,
   MutationCtx,
   Mutations,
-  OpFor,
   RuntimeCommandDef,
   RuntimeMutationDef,
   StandardSchemaV1,

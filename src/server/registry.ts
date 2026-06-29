@@ -66,16 +66,9 @@ export interface CollectionDef {
   pk: string
 }
 
-/** Per-op shape of `op`, discriminated by `type`: an insert carries the full
- *  row, an update a top-level partial patch (ADR-0002 C6), a delete only the
- *  key. Kept as a public alias for back-compat; the authoring API below uses
- *  the explicit `InsertOp`/`UpdateOp`/`DeleteOp` triple. */
-export type OpFor<T extends RowOp, Row> = T extends "insert"
-  ? InsertOp<Row>
-  : T extends "update"
-    ? UpdateOp<Row>
-    : DeleteOp
-
+/** Per-op shape of `op`, discriminated by `type`: an insert carries the full row
+ *  (ADR-0001 D19), an update a top-level partial patch (ADR-0002 C6), a delete
+ *  only the key. */
 export type InsertOp<Row> = { type: "insert"; key: string; cols: Row }
 export type UpdateOp<Row> = { type: "update"; key: string; cols: Partial<Row> }
 export type DeleteOp = { type: "delete"; key: string; cols?: undefined }

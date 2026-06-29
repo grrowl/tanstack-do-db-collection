@@ -101,26 +101,43 @@ The two shapes stay distinct at runtime exactly as ADR-0012 D3 found: a command'
 helpers, rather than ADR-0010's sibling `defineX` methods, makes that divergence
 structural instead of incidental.
 
-### D3: Row co-located on the collection; an optional Standard Schema slot gives runtime validation + inference
+### D3: The row schema lives on the insert mutation; it infers the row and validates writes
 
-The row type lives on the collection two ways. Type-only —
+A collection's row type lives on the collection two ways. Type-only —
 `sync.collection<Message>({ pk, mutations })` — recovers ADR-0010's precise
 `op.cols` with no runtime cost (`pk` is checked against `keyof Row & string`).
-Or **schema-first** — `sync.collection(zMessage, { pk, mutations })` — where `Row`
-is *inferred from* a [Standard Schema](https://standardschema.dev/) value and the
-schema's `~standard.validate` runs at **runtime** inside the compiled `authorize`,
-before the author's `authorize`/`execute`, throwing (fail-loud, rejecting the
-frame) on issues.
+Or **from a [Standard Schema](https://standardschema.dev/) on the insert
+mutation** — `sync.collection({ pk, mutations: { insert: { schema: zMessage } } })`
+— where `Row` is inferred from `insert.schema` and flows to `pk`, to `update`'s
+`Partial<Row>`, and to the client. The "default" row schema and the insert
+validator are the same thing, so the insert mutation is its one home. There is no
+separate positional schema argument.
+
+Each op may carry its own schema, and when present it is checked at runtime inside
+the compiled `authorize`, before the author's `authorize`/`execute`, throwing
+(fail-loud, rejecting the frame) on issues:
+
+- `insert.schema` validates the full-row `cols`.
+- `update.schema` validates the partial patch. The author supplies a partial
+  schema (e.g. `Message.partial()`), because an update carries a top-level partial,
+  not a full row, and a full-row schema would reject every valid partial.
+- a command's schema validates its `args`.
+- a `delete` has no schema. It carries only the key, the wire layer already checks
+  the key is a non-empty string (ADR-0012), and the pk was validated at insert.
 
 This reverses ADR-0010's B3 rejection narrowly and deliberately. ADR-0010 rejected
 a schema slot because it bought no *injection* safety (parameterised binding
-already covers that) at a per-mutation hot-path cost. That still holds — so
-validation is **opt-in** (no schema → no validator runs) and **scoped to where a
-full row exists**: an `insert`'s `cols` and a command's `args` are validated;
-`update` partials and `delete`s are **not** (no complete value to soundly check).
-The slot's primary payoff is *inference + a typed client contract*, with runtime
-validation as the opt-in bonus — not blanket hot-path validation. The interface is
-the dependency-free `~standard` shape (`StandardSchemaV1`, exported); **no validator
+already covers that) at a per-mutation hot-path cost. That still holds, so
+validation is **opt-in**: no schema means no validator runs. The slot's primary
+payoff is inference and a typed client contract, with runtime validation as the
+opt-in bonus.
+
+It is a validation **gate, not a parser**: the handler receives the original wire
+value, never the schema's parsed output, so a schema must not rely on
+transforms/defaults/coercion (input must equal output). Rewriting a row the client
+already applied optimistically would manufacture divergence, and a pk rewrite would
+break optimistic-id == confirmed-id (ADR-0001 D9). The interface is the
+dependency-free `~standard` shape (`StandardSchemaV1`, exported); **no validator
 runtime is imported** — zod/valibot/arktype all satisfy it, and an author who wants
 none pays nothing.
 
@@ -180,10 +197,12 @@ mut/call handler, `runSyncedWrite` is still the path (ADR-0006).
 - **Closed mutations, open commands** — the shape now encodes the rule: if a write
   isn't one-row insert/update/delete it is a command, and the compiler says so
   (excess-property error on a 4th mutation key).
-- **Opt-in validation, scoped.** No schema → zero validator on the hot path
-  (ADR-0010's objection preserved). Schema present → insert `cols` and command
-  `args` validated and inferred; update/delete deliberately unvalidated (no full
-  row). Dependency-free via Standard Schema; no zod runtime pulled in.
+- **Opt-in validation, scoped, gate-not-parser.** No schema → zero validator on
+  the hot path (ADR-0010's objection preserved). Schema present → `insert.schema`
+  validates the full row and infers `Row`, `update.schema` validates the partial
+  patch, a command schema validates `args`; a `delete` is unvalidated (no cols, pk
+  validated at insert). It validates but does not transform — the original value
+  flows to handlers. Dependency-free via Standard Schema; no zod runtime pulled in.
 - **`authorize` divergence is now structural** (ADR-0012 D3): mutation-authorize
   throws stay user-facing, command-authorize throws are sanitized — the two
   helpers make that explicit rather than a shared-code accident.

@@ -5,7 +5,7 @@
 // fails to compile is a red type-test. This pins the author-facing typing the
 // same way a runtime test pins behaviour.
 
-import { defineSync } from "../src/server/registry.ts"
+import { defineSync, type StandardSchemaV1 } from "../src/server/registry.ts"
 
 interface Claims {
   userId: string
@@ -85,3 +85,54 @@ const schema = sync.schema({
   commands: { echo },
 })
 void schema
+
+// --- schema-on-insert: Row is inferred from `mutations.insert.schema` ---
+declare function schemaOf<T>(): StandardSchemaV1<T>
+
+// No `<Row>` generic: Row is inferred from insert.schema and flows to pk, update,
+// and each op's cols.
+const inferred = sync.collection({
+  pk: "id",
+  mutations: {
+    insert: {
+      schema: schemaOf<Message>(),
+      execute: ({ op }) => {
+        const a: string = op.cols.author // op.cols is Message
+        void a
+      },
+    },
+    update: {
+      schema: schemaOf<Partial<Message>>(),
+      execute: ({ op }) => {
+        const a: string | undefined = op.cols.author // op.cols is Partial<Message>
+        void a
+      },
+    },
+  },
+})
+void inferred
+
+// @ts-expect-error pk must be a real column of the inferred Row
+sync.collection({ pk: "nope", mutations: { insert: { schema: schemaOf<Message>(), execute: () => {} } } })
+
+sync.collection({
+  pk: "id",
+  mutations: {
+    insert: { schema: schemaOf<Message>(), execute: () => {} },
+    update: {
+      // @ts-expect-error update.schema must match Partial<Row>; content: number conflicts with string
+      schema: schemaOf<{ content: number }>(),
+      execute: () => {},
+    },
+  },
+})
+
+// The trio stays closed when a schema is present.
+sync.collection({
+  pk: "id",
+  mutations: {
+    insert: { schema: schemaOf<Message>(), execute: () => {} },
+    // @ts-expect-error `archive` is not a member of the insert/update/delete trio
+    archive: { execute: () => {} },
+  },
+})
