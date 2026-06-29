@@ -31,7 +31,7 @@ import {
 } from "./changes.ts"
 import { Broadcaster } from "./broadcast.ts"
 import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx, sweepDedup } from "./dedup.ts"
-import { compileSchema, type CompiledSync, type SyncSchema } from "./registry.ts"
+import { compileSchema, type CompiledSync, type SyncSchema, ValidationError } from "./registry.ts"
 import { andPredicates, compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
 import { SubscriptionRegistry, type Sub } from "./subscriptions.ts"
 
@@ -358,6 +358,10 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
         if (def.authorize) await def.authorize({ user, op, sql: this.sql, env: this.env })
       }
     } catch (e) {
+      // authorize and validation errors surface to the client: a schema failure
+      // carries a VALIDATION code, an authz "throw to deny" keeps its message. The
+      // execute catch below stays sanitized.
+      if (e instanceof ValidationError) return this.rejectTx(ws, f.txId, e.message, "VALIDATION")
       return this.rejectTx(ws, f.txId, errorMessage(e))
     }
 
@@ -426,16 +430,23 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
     if (!def) return this.rejectTx(ws, f.txId, `unknown command '${f.name}'`, "UNKNOWN_COMMAND")
 
     const user = this.userFor(ws)
-    let result: unknown
+    // authorize and validation errors surface like a mutation's: a schema failure
+    // carries a VALIDATION code, an authz "throw to deny" keeps its message. This
+    // matches mutation surfacing, revising ADR-0012 D3 (which sanitized a
+    // command's authorize too).
     try {
       if (def.authorize) await def.authorize({ user, args: f.args, sql: this.sql, env: this.env })
+    } catch (e) {
+      if (e instanceof ValidationError) return this.rejectTx(ws, f.txId, e.message, "VALIDATION")
+      return this.rejectTx(ws, f.txId, errorMessage(e))
+    }
+    // execute runs arbitrary, often async code, so its errors are sanitized like a
+    // mutation's execute — internal detail never leaks.
+    let result: unknown
+    try {
       result = await def.execute({ user, args: f.args, sql: this.sql, env: this.env })
     } catch (e) {
-      // Log full detail server-side; send only a generic message to the client
-      // (ADR-0012). Both authorize and execute errors for commands go through
-      // this path — command authorize errors are NOT currently user-facing API
-      // (unlike mutation authorize, which is "throw to deny"). Log + generic.
-      console.error(`command '${f.name}' failed: ${errorMessage(e)}`)
+      console.error(`command '${f.name}' execute failed: ${errorMessage(e)}`)
       return this.rejectTx(ws, f.txId, "command failed", "EXECUTE_FAILED")
     }
 

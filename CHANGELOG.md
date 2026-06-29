@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, the public API may change between 0.x releases.
 
+## [Unreleased]
+
+### Changed
+
+- **Rejection reasons are surfaced uniformly for mutations and commands (revises
+  ADR-0012 D3).** An `authorize` throw or a schema validation failure now reaches
+  the client with its reason (validation failures carry a `VALIDATION` code);
+  only `execute` errors stay sanitized. Previously a command's `authorize` error
+  was sanitized like its `execute`, unlike a mutation's.
+
+### Added
+
+- **Optional Standard Schema validation (ADR-0014).** A collection's
+  `insert.schema` (the row schema, which also infers the collection's Row) and
+  `update.schema` (a partial patch schema), and a command's schema, are checked
+  at runtime and rejected loudly on failure. Any `~standard` library works (zod,
+  valibot, arktype) and the framework adds no validator dependency. It is a gate,
+  not a parser: the original value flows to handlers, so schemas must not rely on
+  transforms, defaults, or coercion. See
+  `recipes/zod-standard-schema-collections.md`.
+
 ## [0.4.0] — 2026-07-01
 
 ### Changed

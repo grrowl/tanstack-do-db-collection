@@ -2,7 +2,7 @@
 // miniflare.durableObjects, and routes WebSocket upgrades to the sync DO.
 
 import { DurableObject } from "cloudflare:workers"
-import { defineSync } from "../src/server/registry.ts"
+import { defineSync, type StandardSchemaV1 } from "../src/server/registry.ts"
 import { SyncDurableObject } from "../src/server/sync-do.ts"
 
 /** Bare DO for the M1 CDC tests; they drive storage via runInDurableObject. */
@@ -23,6 +23,49 @@ interface MsgRow {
 interface FileRow {
   id: string
   name: string
+}
+
+interface ValidatedRow {
+  id: string
+  body: string
+}
+
+/** A hand-rolled Standard Schema (no validator dependency): rejects when `body`
+ *  is present but not a non-empty string. Used as both the insert (full-row) and
+ *  update (partial) schema for the `validated` collection, to exercise the
+ *  runtime validation gate. */
+function nonEmptyBody<T extends { body?: unknown }>(): StandardSchemaV1<T> {
+  return {
+    "~standard": {
+      version: 1,
+      vendor: "test",
+      validate: (value) => {
+        const v = value as { body?: unknown }
+        if ("body" in v && (typeof v.body !== "string" || v.body.trim() === "")) {
+          return { issues: [{ message: "body must be a non-empty string" }] }
+        }
+        return { value: value as T }
+      },
+    },
+  }
+}
+
+/** A TRANSFORMING Standard Schema — its `validate` returns a MUTATED value
+ *  (uppercased `body`). The gate must DISCARD that output and hand the handler the
+ *  ORIGINAL wire value (ADR-0014 gate-not-parser); if the transform ever leaked
+ *  through, the stored/broadcast row would diverge from the row the client applied
+ *  optimistically (ADR-0001 D9). Used by the `transformed` collection. */
+function upcasingBody<T extends { body?: unknown }>(): StandardSchemaV1<T> {
+  return {
+    "~standard": {
+      version: 1,
+      vendor: "test",
+      validate: (value) => {
+        const v = value as { body?: unknown }
+        return { value: { ...(v as object), body: typeof v.body === "string" ? v.body.toUpperCase() : v.body } as T }
+      },
+    },
+  }
 }
 
 const sync = defineSync<Claims>()
@@ -82,6 +125,39 @@ const testSchema = sync.schema({
         },
       },
     }),
+    // Carries Standard Schemas so the runtime validation gate is exercised: the
+    // insert schema validates the full row, the update schema the partial patch.
+    validated: sync.collection<ValidatedRow>({
+      pk: "id",
+      mutations: {
+        insert: {
+          schema: nonEmptyBody<ValidatedRow>(),
+          execute: ({ op, sql }) => {
+            sql.exec("INSERT INTO validated(id, body) VALUES (?, ?)", op.cols.id, op.cols.body)
+          },
+        },
+        update: {
+          schema: nonEmptyBody<Partial<ValidatedRow>>(),
+          execute: ({ op, sql }) => {
+            sql.exec("UPDATE validated SET body = ? WHERE id = ?", op.cols.body, op.key)
+          },
+        },
+      },
+    }),
+    // Its insert schema TRANSFORMS (uppercases `body`), but the gate discards that
+    // output and the handler stores the RAW `op.cols.body` — a subscriber sees the
+    // wire value, not the transform (ADR-0014 gate-not-parser; ADR-0001 D9).
+    transformed: sync.collection<ValidatedRow>({
+      pk: "id",
+      mutations: {
+        insert: {
+          schema: upcasingBody<ValidatedRow>(),
+          execute: ({ op, sql }) => {
+            sql.exec("INSERT INTO transformed(id, body) VALUES (?, ?)", op.cols.id, op.cols.body)
+          },
+        },
+      },
+    }),
   },
   commands: {
     echo: sync.command<unknown>()(({ args }) => ({ echoed: args })),
@@ -100,6 +176,20 @@ const testSchema = sync.schema({
     boom: sync.command()(() => {
       throw new Error("command boom")
     }),
+    // Carries an args Standard Schema — exercises command-args validation. As for
+    // a mutation, a validation failure surfaces to the client with its reason and a
+    // VALIDATION code (uniform surfacing; ADR-0014 revises ADR-0012 D3).
+    requireBody: sync.command(nonEmptyBody<{ body: string }>(), ({ args }) => ({ echoed: args.body })),
+    // A command whose `authorize` THROWS — its reason must surface to the client
+    // (ADR-0014 unifies command + mutation authorize surfacing; ADR-0012 D3 had
+    // sanitized a command's authorize to a generic message). An `execute` throw
+    // stays sanitized — that's `boom`.
+    denyCall: sync.command()({
+      authorize: () => {
+        throw new Error("call denied by authorize")
+      },
+      execute: () => ({ ok: true }),
+    }),
   },
 })
 
@@ -114,6 +204,8 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
       // The author owns table creation; the framework wires sync after (ADR-0007).
       this.sql.exec(`CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, body TEXT)`)
       this.sql.exec(`CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT)`)
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS validated (id TEXT PRIMARY KEY, body TEXT)`)
+      this.sql.exec(`CREATE TABLE IF NOT EXISTS transformed (id TEXT PRIMARY KEY, body TEXT)`)
       this.registerSync(testSchema)
     })
   }

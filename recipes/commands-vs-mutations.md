@@ -84,10 +84,12 @@ returns the count.
 
 ## Notes
 
-- A mutation's `authorize` denies a write by throwing, and the client receives
-  that error message. A command's `authorize` denies a call the same way, by
-  throwing, but a command's errors are sanitized — the client receives a generic
-  rejection rather than the thrown text.
+- Denial is uniform across mutations and commands: an `authorize` throw, or a
+  schema validation failure, surfaces its reason to the client (validation
+  failures carry a `VALIDATION` code), so you can tell the user why. Only an
+  `execute` error is sanitized to a generic message ("mutation failed" /
+  "command failed") — by then the call is authorized, and a failure there may
+  carry internal detail.
 - You can type a command's args, either with a generic
   (`sync.command<{ before: number }>()(fn)`) or from a schema
   (`sync.command(zArgs, fn)`).

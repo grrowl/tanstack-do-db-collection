@@ -136,3 +136,35 @@ sync.collection({
     archive: { execute: () => {} },
   },
 })
+
+// --- gate-not-parser: `op.cols` is typed from the schema's INPUT, not its parsed
+// OUTPUT. The handler receives the original wire value (ADR-0014), so a
+// transforming schema must not lure the author into treating `cols` as the parsed
+// shape. Here input.count is a string, output.count a number. ---
+declare function transformSchema<In, Out>(): StandardSchemaV1<In, Out>
+
+sync.collection({
+  pk: "id",
+  mutations: {
+    insert: {
+      schema: transformSchema<{ id: string; count: string }, { id: string; count: number }>(),
+      execute: ({ op }) => {
+        const c: string = op.cols.count // INPUT (string) — the value the handler gets
+        void c
+      },
+    },
+  },
+})
+sync.collection({
+  pk: "id",
+  mutations: {
+    insert: {
+      schema: transformSchema<{ id: string; count: string }, { id: string; count: number }>(),
+      execute: ({ op }) => {
+        // @ts-expect-error op.cols.count is the INPUT (string), never the parsed output (number)
+        const n: number = op.cols.count
+        void n
+      },
+    },
+  },
+})
