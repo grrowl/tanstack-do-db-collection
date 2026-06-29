@@ -81,10 +81,73 @@ the milestone sequence.
 ### 1. Define your Durable Object
 
 ```ts
-import { SyncRegistry, SyncDurableObject } from "tanstack-do-db-collection"
+import { defineSync, SyncDurableObject } from "tanstack-do-db-collection"
 
 interface Claims { userId: string }
+interface Env { /* your bindings */ }
 interface Message { id: string; author: string; content: string; created_at: number }
+
+// defineSync binds identity (Claims) and binding-env (Env) once and returns
+// three co-located helpers. They flow `user`/`env` into every handler ctx.
+const sync = defineSync<Claims, Env>()
+
+// The schema VALUE is both the DO registration and the client contract. The
+// collection KEY ("messages") is the DB table name. `pk` must be a real column
+// of Row — the sole TEXT, client-supplied key (ADR-0007).
+export const chatSchema = sync.schema({
+  collections: {
+    messages: sync.collection<Message>({
+      pk: "id",
+      // The closed mutation trio { insert?; update?; delete? } — a 4th key is a
+      // type error. op.cols is typed per op: full Row on insert, Partial on
+      // update, absent on delete.
+      mutations: {
+        insert: {
+          // authorize runs BEFORE the tx (async ok); throw to deny.
+          // op.cols is typed Message here — no cast.
+          authorize: ({ user, op }) => {
+            if (op.cols.author !== user.userId) {
+              throw new Error("author mismatch")
+            }
+          },
+          // execute runs INSIDE transactionSync — synchronous only.
+          execute: ({ op, sql }) => {
+            const m = op.cols // Message
+            sql.exec(
+              "INSERT INTO messages(id, author, content, created_at) VALUES (?, ?, ?, ?)",
+              m.id, m.author, m.content, m.created_at,
+            )
+          },
+          // afterCommit (optional): fire-and-forget AFTER the commit + receipt —
+          // the home for external side effects execute can't do (delete an R2
+          // object, enqueue a job). Receives `env`; owns its own idempotency.
+          // afterCommit: async ({ op, env }) => { await env.BUCKET.delete(op.key) },
+        },
+        delete: {
+          execute: ({ op, sql }) => {
+            // delete carries op.key only — no op.cols.
+            sql.exec("DELETE FROM messages WHERE id = ?", op.key)
+          },
+        },
+      },
+    }),
+  },
+  // Commands are the escape hatch for writes that aren't a single typed row op.
+  // Their own SQL still flows through the CDC triggers, and they can return a
+  // result. Type-only Args is curried (call the factory twice); Result is
+  // inferred from the return. If you have commands you MUST declare them inline
+  // here so Args/Result inference flows into the Api type.
+  commands: {
+    clearRoom: sync.command()(({ sql }) => {
+      const before = Array.from(sql.exec("SELECT count(*) AS c FROM messages"))[0]!.c as number
+      sql.exec("DELETE FROM messages")
+      return { deleted: before }
+    }),
+  },
+})
+
+// Export the schema type as the client contract.
+export type Api = typeof chatSchema
 
 export class SessionDO extends SyncDurableObject<Env, Claims> {
   constructor(ctx: DurableObjectState, env: Env) {
@@ -101,35 +164,9 @@ export class SessionDO extends SyncDurableObject<Env, Claims> {
         created_at INTEGER NOT NULL
       )`)
 
-      this.registerSync(
-        // The third generic is the collection manifest: table → row type. It
-        // types `pk` (must be a column) and every handler's `op` — no casts.
-        new SyncRegistry<Claims, Env, { messages: Message }>()
-          .defineCollection({ table: "messages", pk: "id" })
-          .defineMutation({
-            collection: "messages",
-            type: "insert",
-            // authorize runs BEFORE the tx (async ok); throw to deny.
-            // op.cols is typed Message here — no cast.
-            authorize: ({ user, op }) => {
-              if (op.cols.author !== user.userId) {
-                throw new Error("author mismatch")
-              }
-            },
-            // execute runs INSIDE transactionSync — synchronous only.
-            execute: ({ op, sql }) => {
-              const m = op.cols // Message
-              sql.exec(
-                "INSERT INTO messages(id, author, content, created_at) VALUES (?, ?, ?, ?)",
-                m.id, m.author, m.content, m.created_at,
-              )
-            },
-            // afterCommit (optional): fire-and-forget AFTER the commit + receipt —
-            // the home for external side effects execute can't do (delete an R2
-            // object, enqueue a job). Receives `env`; owns its own idempotency.
-            // afterCommit: async ({ op, env }) => { await env.BUCKET.delete(op.key) },
-          }),
-      )
+      // registerSync takes the schema VALUE — it compiles it, validates pk
+      // affinity, and wires the CDC triggers.
+      this.registerSync(chatSchema)
     })
   }
 
@@ -187,10 +224,14 @@ import { createCollection } from "@tanstack/db"
 import { useLiveQuery } from "@tanstack/react-db"
 import { doCollectionOptions, WebSocketTransport } from "tanstack-do-db-collection/client"
 import { ulid } from "ulid"
+import type { Api } from "./session-do" // TYPE-ONLY — nothing server-side is bundled
 
-const transport = new WebSocketTransport({ url: `wss://${host}/sync/${sessionId}` })
+const transport = new WebSocketTransport<Api>({ url: `wss://${host}/sync/${sessionId}` })
+
+// Api-driven: the row type is inferred from the schema Api + table name, so
+// there's no runtime schema value and no explicit Row generic. `m` is Message.
 const messages = createCollection(
-  doCollectionOptions<Message>({ transport, table: "messages", getKey: (m) => m.id }),
+  doCollectionOptions<Api, "messages">({ transport, table: "messages", getKey: (m) => m.id }),
 )
 
 function ChatRoom({ userId }: { userId: string }) {
@@ -198,13 +239,19 @@ function ChatRoom({ userId }: { userId: string }) {
   const send = (content: string) =>
     // Optimistic; resolves once the server confirms on the single stream.
     messages.insert({ id: ulid(), author: userId, content, created_at: Date.now() })
-  return <ChatView rows={data} onSend={send} />
+  // Commands run over the transport (not the collection). `call` is a typed
+  // Proxy — the name autocompletes and the result is checked against the Api.
+  const clear = () => transport.call.clearRoom() // Promise<{ deleted: number }>
+  return <ChatView rows={data} onSend={send} onClear={clear} />
 }
 ```
 
 One `WebSocketTransport` per DO is shared by every collection on that DO
 (multiplexed over the single socket). Pass `where` to
-`doCollectionOptions` to sync only a matching subset.
+`doCollectionOptions` to sync only a matching subset. Commands go through the
+same socket: `transport.call.<name>(args)` (typed sugar) or the low-level
+`transport.sendCall("clearRoom", undefined)` — both mint the txId for you and
+resolve with the command's result on `committed`.
 
 ---
 

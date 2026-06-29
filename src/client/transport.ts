@@ -71,7 +71,20 @@ interface TxWaiter {
   timer: ReturnType<typeof setTimeout>
 }
 
-export class WebSocketTransport {
+// --- Typed-command projection over the schema Api (`typeof schema`) ---------
+// Structural-only: the client imports the Api *as a type*, so these recover the
+// command map and each command's Args/Result from the phantom carriers the
+// server's `CommandEntry` attaches — no server import, nothing at runtime.
+type CommandsOf<Api> = Api extends { commands: infer C } ? C : Record<never, never>
+type CommandName<Api> = keyof CommandsOf<Api> & string
+type ArgsOf<Entry> = Entry extends { __args?: infer A } ? A : never
+type ResultOf<Entry> = Entry extends { __result?: infer R } ? R : never
+/** The `transport.call.*` proxy: one method per command, args + result typed. */
+type CallProxy<Api> = {
+  [K in keyof CommandsOf<Api>]: (args: ArgsOf<CommandsOf<Api>[K]>) => Promise<ResultOf<CommandsOf<Api>[K]>>
+}
+
+export class WebSocketTransport<Api = unknown> {
   private ws: WebSocketLike | null = null
   private connectPromise: Promise<void> | null = null
   private readonly codec: FrameCodec
@@ -236,9 +249,32 @@ export class WebSocketTransport {
     return this.sendAwaitingReceipt(frame, frame.txId)
   }
 
-  sendCall(frame: Extract<ClientFrame, { t: "call" }>): Promise<{ result?: unknown }> {
-    return this.sendAwaitingReceipt(frame, frame.txId)
+  /**
+   * Invoke a server command by name. Builds the `call` frame internally and
+   * generates the txId (`crypto.randomUUID()`) — the app no longer supplies one.
+   * Name + args are checked and the result is inferred against the schema `Api`.
+   * Resolves with the command's result when its `committed` receipt arrives.
+   */
+  async sendCall<K extends CommandName<Api>>(
+    name: K,
+    args: ArgsOf<CommandsOf<Api>[K]>,
+  ): Promise<ResultOf<CommandsOf<Api>[K]>> {
+    const txId = crypto.randomUUID()
+    const { result } = await this.sendAwaitingReceipt({ t: "call", txId, name, args }, txId)
+    return result as ResultOf<CommandsOf<Api>[K]>
   }
+
+  /** Sugar over `sendCall`: `transport.call.clearRoom({ … })`. One method per
+   *  command on the schema `Api`; a Proxy forwarding to `sendCall`. */
+  readonly call: CallProxy<Api> = new Proxy(
+    {},
+    {
+      get:
+        (_t, name: string) =>
+        (args: unknown): Promise<unknown> =>
+          this.sendCall(name as CommandName<Api>, args as ArgsOf<CommandsOf<Api>[CommandName<Api>]>),
+    },
+  ) as CallProxy<Api>
 
   /** One-shot page fetch; resolves with the page's rows. No live subscription. */
   async fetch(frame: Extract<ClientFrame, { t: "fetch" }>): Promise<Array<unknown>> {

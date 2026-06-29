@@ -52,7 +52,7 @@ export function initSchema(sql: SqlStorage): void {
 /**
  * Install AFTER INSERT/UPDATE/DELETE triggers copying change events into
  * `_sync_changes`. Idempotent. `tbl`/`pk` MUST be validated identifiers
- * (the SyncRegistry enforces this via `assertValidCollection`) — they are
+ * (`compileSchema` enforces this via `assertValidCollection`) — they are
  * interpolated into DDL. Identifiers are double-quoted for consistency with the
  * rest of the codebase (`sql-compiler.ts`, `ensureTriggers`' DROP), though the
  * regex gate remains the real safety net. The `'${tbl}'` string literal (the
@@ -252,7 +252,7 @@ export function readChangesSinceFor(
 }
 
 /** Current rows for a set of keys, for hydrating deltas. `tbl`/`pk` are
- *  validated identifiers (the SyncRegistry enforces this). Queries in chunks
+ *  validated identifiers (`compileSchema` enforces this). Queries in chunks
  *  of 64 to avoid SQLite bound-parameter limits and eliminate the N+1 pattern:
  *  a reconnect catch-up over 500 keys now issues ⌈500/64⌉ = 8 queries instead
  *  of 500. Identifiers are quoted; values are bound parameters. */

@@ -8,7 +8,31 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **Authoring is now an object schema, not a builder (ADR-0014).**
+  `new SyncRegistry().defineCollection().defineMutation().defineCommand()` is
+  replaced by `defineSync<User, Env>()`, which binds identity/env once and
+  returns `{ collection, command, schema }`. Mutations are a **closed
+  insert/update/delete trio** co-located on the collection (mirroring
+  `@tanstack/db`'s `onInsert/onUpdate/onDelete` — a custom mutation type is now
+  structurally unrepresentable), superseding ADR-0001 D11 and absorbing
+  ADR-0010's row manifest: the row type lives on the collection
+  (`sync.collection<Message>({ pk })`) instead of a third `SyncRegistry`
+  generic. The DO registers the schema value with `this.registerSync(schema)`.
+  Breaking, no compat shim.
+
+### Added
+
+- **Typed commands, end to end (ADR-0014).** `export type Api = typeof schema`
+  is the whole client contract: `new WebSocketTransport<Api>()` exposes a typed
+  `transport.call.<command>(args)` proxy plus a typed low-level
+  `sendCall(name, args)` (txId generated internally via `crypto.randomUUID()`),
+  and `doCollectionOptions<Api, "table">({ … })` infers the row type from the
+  schema — one source of truth across server and client.
+- **`examples/multi-do`** — a two-Durable-Object example: one transport per DO, a
+  React `SyncProvider`/`useSync` keyed by DO so command namespaces never
+  collide, and a client-side cross-DO feed.
 
 ## [0.3.3] — 2026-06-13
 

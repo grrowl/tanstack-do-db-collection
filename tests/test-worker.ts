@@ -2,7 +2,7 @@
 // miniflare.durableObjects, and routes WebSocket upgrades to the sync DO.
 
 import { DurableObject } from "cloudflare:workers"
-import { SyncRegistry } from "../src/server/registry.ts"
+import { defineSync } from "../src/server/registry.ts"
 import { SyncDurableObject } from "../src/server/sync-do.ts"
 
 /** Bare DO for the M1 CDC tests; they drive storage via runInDurableObject. */
@@ -20,6 +20,89 @@ interface MsgRow {
   body: string
 }
 
+interface FileRow {
+  id: string
+  name: string
+}
+
+const sync = defineSync<Claims>()
+
+// The same collections/mutations/commands as before, authored via the
+// object-schema API. The schema VALUE is registered on the DO below.
+const testSchema = sync.schema({
+  collections: {
+    messages: sync.collection<MsgRow>({
+      pk: "id",
+      mutations: {
+        insert: {
+          authorize: ({ op }) => {
+            if (op.cols.body === "FORBIDDEN") throw new Error("forbidden body")
+          },
+          execute: ({ op, sql }) => {
+            sql.exec("INSERT INTO messages(id, body) VALUES (?, ?)", op.cols.id, op.cols.body)
+          },
+        },
+        update: {
+          execute: ({ op, sql }) => {
+            sql.exec("UPDATE messages SET body = ? WHERE id = ?", op.cols.body, op.key)
+          },
+        },
+        delete: {
+          execute: ({ op, sql }) => {
+            sql.exec("DELETE FROM messages WHERE id = ?", op.key)
+          },
+        },
+      },
+    }),
+    // A second collection on the same DO — exercises multiplexing over one WS.
+    files: sync.collection<FileRow>({
+      pk: "id",
+      mutations: {
+        insert: {
+          execute: ({ op, sql }) => {
+            sql.exec("INSERT INTO files(id, name) VALUES (?, ?)", op.cols.id, op.cols.name)
+          },
+        },
+        // `files:delete` exercises afterCommit: the synchronous execute is the
+        // durable write; afterCommit is fire-and-forget async post-work (here it
+        // records a marker proving both `sql` and `env` reached the hook).
+        delete: {
+          execute: ({ op, sql }) => {
+            sql.exec("DELETE FROM files WHERE id = ?", op.key)
+          },
+          afterCommit: async ({ op, sql, env }) => {
+            // A genuine async hop, to prove afterCommit awaits and runs off the
+            // request path. `_afterlog` is a plain side table (no CDC triggers).
+            await Promise.resolve()
+            if (op.key === "boom") throw new Error("afterCommit boom")
+            sql.exec("CREATE TABLE IF NOT EXISTS _afterlog (key TEXT PRIMARY KEY, tag TEXT)")
+            const hasEnv = (env as { SYNC_DO?: unknown }).SYNC_DO ? "has-env" : "no-env"
+            sql.exec("INSERT OR REPLACE INTO _afterlog(key, tag) VALUES (?, ?)", op.key, hasEnv)
+          },
+        },
+      },
+    }),
+  },
+  commands: {
+    echo: sync.command<unknown>()(({ args }) => ({ echoed: args })),
+    // A SQL-WRITING command. Unlike `echo` (pure RPC), this mutates rows:
+    // its `DELETE` fires the same CDC triggers a mutation would, so the
+    // removed rows broadcast to other subscribers as ordinary `delete`
+    // deltas — AND it returns a result (the count) on `committed`. That
+    // pairing (bulk write + result) is exactly what a typed
+    // insert/update/delete mutation can't express, and why commands are
+    // the escape hatch for non-CRUD operations.
+    clearMessages: sync.command()(({ sql }) => {
+      const before = Array.from(sql.exec("SELECT count(*) AS c FROM messages"))[0]!.c as number
+      sql.exec("DELETE FROM messages")
+      return { deleted: before }
+    }),
+    boom: sync.command()(() => {
+      throw new Error("command boom")
+    }),
+  },
+})
+
 export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env)
@@ -27,75 +110,7 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
       // The author owns table creation; the framework wires sync after (ADR-0007).
       this.sql.exec(`CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, body TEXT)`)
       this.sql.exec(`CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT)`)
-      this.registerSync(
-        new SyncRegistry<Claims>()
-          .defineCollection({ table: "messages", pk: "id" })
-          .defineMutation({
-            collection: "messages",
-            type: "insert",
-            authorize: ({ op }) => {
-              if ((op.cols as unknown as MsgRow).body === "FORBIDDEN") throw new Error("forbidden body")
-            },
-            execute: ({ op, sql }) => {
-              const c = op.cols as unknown as MsgRow
-              sql.exec("INSERT INTO messages(id, body) VALUES (?, ?)", c.id, c.body)
-            },
-          })
-          .defineMutation({
-            collection: "messages",
-            type: "update",
-            execute: ({ op, sql }) => {
-              const c = op.cols as unknown as { body: string }
-              sql.exec("UPDATE messages SET body = ? WHERE id = ?", c.body, op.key as string)
-            },
-          })
-          .defineMutation({
-            collection: "messages",
-            type: "delete",
-            execute: ({ op, sql }) => {
-              sql.exec("DELETE FROM messages WHERE id = ?", op.key as string)
-            },
-          })
-          // A second collection on the same DO — exercises multiplexing over one WS.
-          .defineCollection({ table: "files", pk: "id" })
-          .defineMutation({
-            collection: "files",
-            type: "insert",
-            execute: ({ op, sql }) => {
-              const c = op.cols as unknown as { id: string; name: string }
-              sql.exec("INSERT INTO files(id, name) VALUES (?, ?)", c.id, c.name)
-            },
-          })
-          // `files:delete` exercises afterCommit: the synchronous execute is the
-          // durable write; afterCommit is fire-and-forget async post-work (here it
-          // records a marker proving both `sql` and `env` reached the hook).
-          .defineMutation({
-            collection: "files",
-            type: "delete",
-            execute: ({ op, sql }) => {
-              sql.exec("DELETE FROM files WHERE id = ?", op.key as string)
-            },
-            afterCommit: async ({ op, sql, env }) => {
-              // A genuine async hop, to prove afterCommit awaits and runs off the
-              // request path. `_afterlog` is a plain side table (no CDC triggers).
-              await Promise.resolve()
-              if ((op.key as string) === "boom") throw new Error("afterCommit boom")
-              sql.exec("CREATE TABLE IF NOT EXISTS _afterlog (key TEXT PRIMARY KEY, tag TEXT)")
-              const hasEnv = (env as { SYNC_DO?: unknown }).SYNC_DO ? "has-env" : "no-env"
-              sql.exec("INSERT OR REPLACE INTO _afterlog(key, tag) VALUES (?, ?)", op.key as string, hasEnv)
-            },
-          })
-          .defineCommand({
-            name: "echo",
-            execute: ({ args }) => ({ echoed: args }),
-          })
-          .defineCommand({
-            name: "boom",
-            execute: () => {
-              throw new Error("command boom")
-            },
-          }),
-      )
+      this.registerSync(testSchema)
     })
   }
 

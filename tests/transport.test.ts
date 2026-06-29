@@ -10,8 +10,16 @@ import type { ClientFrame } from "../src/wire/frames.ts"
 // confirmation resolves, the single cursor advances on commit boundaries, a
 // rejected write surfaces as an error, and a command returns its result.
 
-function connect(room: string): Promise<WebSocketTransport> {
-  const t = new WebSocketTransport({
+// Minimal slice of the test-worker schema Api: enough to name-check + infer the
+// `echo` command's args/result through the transport's typed `sendCall`.
+type TestApi = {
+  commands: {
+    echo: { __args?: { n: number }; __result?: { echoed: { n: number } } }
+  }
+}
+
+function connect(room: string): Promise<WebSocketTransport<TestApi>> {
+  const t = new WebSocketTransport<TestApi>({
     url: `https://example.com/sync/${room}`,
     open: async () => {
       const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
@@ -101,8 +109,10 @@ describe("WebSocketTransport (M3 client)", () => {
 
   it("returns a command result via sendCall", async () => {
     const t = await connect("tr-call")
-    const res = await t.sendCall({ t: "call", txId: "c1", name: "echo", args: { n: 1 } })
-    expect(res.result).toEqual({ echoed: { n: 1 } })
+    // sendCall now takes (name, args), generates the txId internally, and
+    // resolves with the command's result directly (no `{ result }` wrapper).
+    const res = await t.sendCall("echo", { n: 1 })
+    expect(res).toEqual({ echoed: { n: 1 } })
     t.close()
   })
 
