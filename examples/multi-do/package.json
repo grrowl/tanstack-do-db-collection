@@ -1,0 +1,26 @@
+{
+  "name": "tanstack-do-db-multi-do-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:client": "esbuild src/client.tsx --bundle --outfile=public/client.js --format=esm --jsx=automatic",
+    "watch:client": "esbuild src/client.tsx --bundle --outfile=public/client.js --format=esm --jsx=automatic --watch",
+    "dev": "npm run build:client && wrangler dev"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.0.0",
+    "@tanstack/db": "0.6.5",
+    "@tanstack/react-db": "0.1.83",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ulid": "^2.3.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260518.1",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7",
+    "wrangler": "^4"
+  }
+}
