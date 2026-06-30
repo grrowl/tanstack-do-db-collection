@@ -76,15 +76,25 @@ interface TxWaiter {
 // command map and each command's Args/Result from the phantom carriers the
 // server's `CommandEntry` attaches — no server import, nothing at runtime.
 type CommandsOf<Api> = Api extends { commands: infer C } ? C : Record<never, never>
-type CommandName<Api> = keyof CommandsOf<Api> & string
+/** Callable command names. `""` is excluded: `wellFormed` drops a call frame
+ *  with an empty name, so a `""` command would hang on the wire; making it
+ *  uncallable here turns that footgun into harmless dead code at no runtime cost. */
+type CommandName<Api> = Exclude<keyof CommandsOf<Api> & string, "">
 type ArgsOf<Entry> = Entry extends { __args?: infer A } ? A : never
 type ResultOf<Entry> = Entry extends { __result?: infer R } ? R : never
-/** The `transport.call.*` proxy: one method per command, args + result typed. */
+/** The `transport.call.*` proxy: one method per command, args + result typed.
+ *  `""` is remapped away for the same reason as `CommandName`. */
 type CallProxy<Api> = {
-  [K in keyof CommandsOf<Api>]: (args: ArgsOf<CommandsOf<Api>[K]>) => Promise<ResultOf<CommandsOf<Api>[K]>>
+  [K in keyof CommandsOf<Api> as K extends "" ? never : K]: (
+    args: ArgsOf<CommandsOf<Api>[K]>,
+  ) => Promise<ResultOf<CommandsOf<Api>[K]>>
 }
 
 export class WebSocketTransport<Api = unknown> {
+  /** Phantom brand tying the transport to its schema `Api`, so a transport for
+   *  one DO is not assignable where another DO's schema is expected. `declare`
+   *  keeps it type-only — no runtime field. */
+  declare readonly __api?: Api
   private ws: WebSocketLike | null = null
   private connectPromise: Promise<void> | null = null
   private readonly codec: FrameCodec
