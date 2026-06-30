@@ -40,10 +40,10 @@ const inboxTransport = new WebSocketTransport<InboxApi>({
 // One collection per (DO, table). Row is inferred from the Api + table — no
 // runtime schema value crosses the wire.
 const messages = createCollection(
-  doCollectionOptions<RoomApi, "messages">({ transport: roomTransport, table: "messages", getKey: (m) => m.id }),
+  doCollectionOptions({ transport: roomTransport, table: "messages", getKey: (m) => m.id }),
 )
 const notifications = createCollection(
-  doCollectionOptions<InboxApi, "notifications">({
+  doCollectionOptions({
     transport: inboxTransport,
     table: "notifications",
     getKey: (n) => n.id,

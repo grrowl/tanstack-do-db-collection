@@ -32,7 +32,7 @@ const wsProto = location.protocol === "https:" ? "wss:" : "ws:"
 const transport = new WebSocketTransport<BoardApi>({ url: `${wsProto}//${location.host}/sync?${qs}` })
 const tasks = createCollection(
   // Row (Task) is inferred from BoardApi + the "tasks" table — no runtime schema.
-  doCollectionOptions<BoardApi, "tasks">({ transport, table: "tasks", getKey: (t) => t.id, syncMode: "on-demand" }),
+  doCollectionOptions({ transport, table: "tasks", getKey: (t) => t.id, syncMode: "on-demand" }),
 )
 // A range index on the order column lets the live query page lazily via the
 // cursor instead of falling back to loading the whole subset. BTreeIndex suits

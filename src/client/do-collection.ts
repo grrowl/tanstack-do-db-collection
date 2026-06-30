@@ -42,24 +42,6 @@ export type RowOf<Api, K extends PropertyKey> = K extends keyof CollectionsOf<Ap
     : never
   : never
 
-export interface DoCollectionOptions<T extends object> {
-  /** One transport per DO; shared by all collections on that DO. */
-  transport: WebSocketTransport<any>
-  /** Collection (table) name on the DO. */
-  table: string
-  /** Stable client-supplied key extractor (must match the server pk). */
-  getKey: (row: T) => string
-  /** Collection id; defaults to the table name. */
-  id?: string
-  /**
-   * 'eager' (default) syncs the whole collection (optionally filtered by
-   * `where`). 'on-demand' syncs only the subsets that live queries request.
-   */
-  syncMode?: "eager" | "on-demand"
-  /** Eager-mode server-side filter + write preflight (a @tanstack/db IR). */
-  where?: unknown
-}
-
 interface PendingMutationLike {
   type: RowOp
   key: string
@@ -108,15 +90,26 @@ export interface DoApiCollectionOptions<Api, K extends CollectionName<Api>> {
   where?: unknown
 }
 
-// Api-driven: `doCollectionOptions<Api, "messages">({ transport, table, getKey })`
-// — Row inferred from the schema. Listed first so a zero-type-arg call infers
-// Api from the transport rather than collapsing Row to the explicit-T overload.
+// The schema `Api` is the single source of truth: `Api` is inferred from the
+// (branded) transport and the table key from the `table` literal, so the row
+// type follows and a table that isn't a collection of `Api` is a type error.
+//
+//   const messages = createCollection(
+//     doCollectionOptions({ transport, table: "messages", getKey: (m) => m.id }),
+//   )
+//
+// Explicit type args are optional (`doCollectionOptions<Api, "messages">(...)`).
 export function doCollectionOptions<Api, K extends CollectionName<Api>>(
   opts: DoApiCollectionOptions<Api, K>,
 ): CollectionConfig<RowOf<Api, K> & object, string>
-// Explicit-Row: `doCollectionOptions<Message>({ transport, table, getKey })`.
-export function doCollectionOptions<T extends object>(opts: DoCollectionOptions<T>): CollectionConfig<T, string>
-export function doCollectionOptions(opts: DoCollectionOptions<any>): CollectionConfig<any, string> {
+export function doCollectionOptions(opts: {
+  transport: WebSocketTransport<any>
+  table: string
+  getKey: (row: any) => string
+  id?: string
+  syncMode?: "eager" | "on-demand"
+  where?: unknown
+}): CollectionConfig<any, string> {
   const { transport, table, getKey, where } = opts
   const syncMode = opts.syncMode ?? "eager"
   const eagerSubId = `${table}#${++subSeq}`

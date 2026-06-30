@@ -18,7 +18,7 @@ const transport = new WebSocketTransport<ItemsApi>({
 })
 
 const items = createCollection(
-  doCollectionOptions<ItemsApi, "items">({ transport, table: "items", getKey: (i) => i.id, syncMode: "on-demand" }),
+  doCollectionOptions({ transport, table: "items", getKey: (i) => i.id, syncMode: "on-demand" }),
 )
 
 // Mounting requests this category's subset; unmounting releases it.

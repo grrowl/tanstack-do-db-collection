@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import { doCollectionOptions } from "../src/client/do-collection.ts"
 import { type SubHandler, WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
 import type { ClientFrame } from "../src/wire/frames.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: on-demand loads ONLY the subsets live queries request, instead of
 // syncing the whole collection. These pin: distinct `where`s become distinct
@@ -66,7 +67,7 @@ function fakeTransport(page: Array<unknown> = []) {
     },
     sendMut: async () => ({}),
     close: () => {},
-  } as unknown as WebSocketTransport
+  } as unknown as WebSocketTransport<TestApi>
   return { subs, unsubs, fetches, transport }
 }
 
@@ -80,9 +81,9 @@ type OnDemand = {
   loadSubset: (o: LoadOpts) => true | Promise<void>
   unloadSubset: (o: LoadOpts) => void
 }
-const startOnDemand = (transport: WebSocketTransport, present?: Set<string>) => {
+const startOnDemand = (transport: WebSocketTransport<TestApi>, present?: Set<string>) => {
   const { calls, controls } = spyControls(present)
-  const adapter = doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id, syncMode: "on-demand" })
+  const adapter = doCollectionOptions({ transport, table: "messages", getKey: (r) => r.id, syncMode: "on-demand" })
   const res = (adapter as unknown as { sync: { sync: (p: unknown) => OnDemand } }).sync.sync(controls)
   return { calls, res }
 }
@@ -132,7 +133,7 @@ describe("on-demand loadSubset (M11) — refcounting", () => {
       unsubscribe: () => {},
       sendMut: async () => ({}),
       close: () => {},
-    } as unknown as WebSocketTransport
+    } as unknown as WebSocketTransport<TestApi>
     const { res } = startOnDemand(rejectingTransport)
 
     // Resolves (does not hang); a 50ms race guards against regression.
@@ -251,9 +252,9 @@ describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => 
       ],
       sendMut: async () => ({}),
       close: () => {},
-    } as unknown as WebSocketTransport
+    } as unknown as WebSocketTransport<TestApi>
 
-    const adapter = doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id, syncMode: "on-demand" })
+    const adapter = doCollectionOptions({ transport, table: "messages", getKey: (r) => r.id, syncMode: "on-demand" })
     const res = (adapter as unknown as { sync: { sync: (p: unknown) => OnDemand } }).sync.sync(controls)
 
     await res.loadSubset({ where: whereEq("room", "r1") }) // initial sub -> captures liveHandler
@@ -271,8 +272,8 @@ describe("on-demand loadSubset (M12) — cursor load-more (scroll-back)", () => 
 })
 
 describe("on-demand loadSubset (M11) — against the DO", () => {
-  function realTransport(room: string): WebSocketTransport {
-    return new WebSocketTransport({
+  function realTransport(room: string): WebSocketTransport<TestApi> {
+    return new WebSocketTransport<TestApi>({
       url: `https://example.com/sync/${room}`,
       open: async () => {
         const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
@@ -293,7 +294,7 @@ describe("on-demand loadSubset (M11) — against the DO", () => {
     })
 
     const messages = createCollection(
-      doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
+      doCollectionOptions({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
     )
     await messages.preload() // ready, but empty — nothing synced eagerly
     expect(messages.size).toBe(0)
@@ -320,7 +321,7 @@ describe("on-demand loadSubset (M11) — against the DO", () => {
     })
 
     const messages = createCollection(
-      doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
+      doCollectionOptions({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
     )
     await messages.preload()
 
@@ -440,7 +441,7 @@ describe("on-demand loadSubset (M11) — against the DO", () => {
     })
 
     const messages = createCollection(
-      doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
+      doCollectionOptions({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
     )
     await messages.preload()
     // Bounded window — top 3 by body desc (m5, m4, m3). m0 is cold.
@@ -467,7 +468,7 @@ describe("on-demand loadSubset (M11) — against the DO", () => {
     const t = realTransport(room)
     await t.connect()
     const messages = createCollection(
-      doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
+      doCollectionOptions({ transport: t, table: "messages", getKey: (m) => m.id, syncMode: "on-demand" }),
     )
     await messages.preload()
     const kept = createLiveQueryCollection((q) => q.from({ m: messages }).where(({ m }) => eq(m.body, "keep")))

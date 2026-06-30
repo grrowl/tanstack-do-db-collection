@@ -3,6 +3,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions } from "../src/client/do-collection.ts"
 import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: the real proof of the stack — a genuine @tanstack/db createCollection,
 // driven by our adapter + transport, against a real DO in workerd (not spy
@@ -11,13 +12,8 @@ import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.
 // the actual TanStack runtime. Possible because createCollection runs in
 // workerd (verified by probes).
 
-interface Msg {
-  id: string
-  body: string
-}
-
-function makeTransport(room: string): WebSocketTransport {
-  return new WebSocketTransport({
+function makeTransport(room: string): WebSocketTransport<TestApi> {
+  return new WebSocketTransport<TestApi>({
     url: `https://example.com/sync/${room}`,
     open: async () => {
       const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
@@ -40,7 +36,7 @@ describe("end-to-end: createCollection + adapter + transport + DO", () => {
     })
 
     const messages = createCollection(
-      doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (r) => r.id }),
+      doCollectionOptions({ transport: t, table: "messages", getKey: (r) => r.id }),
     )
 
     await messages.preload() // starts sync -> subscribe -> snapshot -> markReady
@@ -59,8 +55,8 @@ describe("end-to-end: createCollection + adapter + transport + DO", () => {
     const tb = makeTransport(room)
     await Promise.all([ta.connect(), tb.connect()])
 
-    const a = createCollection(doCollectionOptions<Msg>({ transport: ta, table: "messages", getKey: (r) => r.id }))
-    const b = createCollection(doCollectionOptions<Msg>({ transport: tb, table: "messages", getKey: (r) => r.id }))
+    const a = createCollection(doCollectionOptions({ transport: ta, table: "messages", getKey: (r) => r.id }))
+    const b = createCollection(doCollectionOptions({ transport: tb, table: "messages", getKey: (r) => r.id }))
     await Promise.all([a.preload(), b.preload()])
 
     await a.insert({ id: "x", body: "from-a" }).isPersisted.promise

@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions, WriteOutsideSubError } from "../src/client/do-collection.ts"
 import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: a filtered collection must (a) sync only the matching subset from the
 // server, and (b) reject a write whose row would fall outside the filter before
@@ -23,8 +24,8 @@ const whereEq = (field: string, value: unknown): unknown => ({
   ],
 })
 
-function connect(room: string): Promise<WebSocketTransport> {
-  const t = new WebSocketTransport({
+function connect(room: string): Promise<WebSocketTransport<TestApi>> {
+  const t = new WebSocketTransport<TestApi>({
     url: `https://example.com/sync/${room}`,
     open: async () => {
       const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
@@ -47,9 +48,9 @@ async function waitFor(pred: () => boolean, timeoutMs = 2000): Promise<void> {
 
 type Call = [string, unknown?]
 
-function startFiltered(transport: WebSocketTransport, where: unknown): { calls: Array<Call>; adapter: ReturnType<typeof doCollectionOptions<Msg>> } {
+function startFiltered(transport: WebSocketTransport<TestApi>, where: unknown): { calls: Array<Call>; adapter: ReturnType<typeof doCollectionOptions<TestApi, "messages">> } {
   const calls: Array<Call> = []
-  const adapter = doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id, where })
+  const adapter = doCollectionOptions({ transport, table: "messages", getKey: (r) => r.id, where })
   ;(adapter as unknown as { sync: { sync: (p: unknown) => void } }).sync.sync({
     collection: { get: () => undefined }, // adapter consults held keys (held-insert upsert)
     begin: () => calls.push(["begin"]),

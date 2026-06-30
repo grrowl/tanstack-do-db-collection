@@ -26,7 +26,7 @@ const transport = new WebSocketTransport<ChatApi>({
 // One transport per DO, shared by every collection on it. The Row type is
 // inferred from ChatApi + the table name — no runtime schema value needed.
 const messages = createCollection(
-  doCollectionOptions<ChatApi, "messages">({ transport, table: "messages", getKey: (m) => m.id }),
+  doCollectionOptions({ transport, table: "messages", getKey: (m) => m.id }),
 )
 
 function App(): JSX.Element {

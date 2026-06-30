@@ -103,6 +103,10 @@ const testSchema = sync.schema({
   },
 })
 
+/** The schema's type, for client-side tests to type their transport + collections
+ *  (`new WebSocketTransport<TestApi>(...)`, `doCollectionOptions<TestApi, "messages">`). */
+export type TestApi = typeof testSchema
+
 export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env)

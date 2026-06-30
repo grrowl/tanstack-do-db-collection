@@ -3,26 +3,18 @@ import { SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions } from "../src/client/do-collection.ts"
 import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: a session typically watches several tables of one DO at once. The design
 // multiplexes all of them over a SINGLE WebSocket (transport demuxes by subId,
 // server routes by collection). This pins that two collections sync
 // independently over exactly one socket — one connection per DO, not per table.
 
-interface Msg {
-  id: string
-  body: string
-}
-interface File {
-  id: string
-  name: string
-}
-
 describe("multi-collection multiplexing over one WS (M8)", () => {
   it("syncs two collections over a single shared socket", async () => {
     const room = "mux"
     const sockets: Array<WebSocketLike> = []
-    const transport = new WebSocketTransport({
+    const transport = new WebSocketTransport<TestApi>({
       url: `https://example.com/sync/${room}`,
       open: async () => {
         const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
@@ -35,8 +27,8 @@ describe("multi-collection multiplexing over one WS (M8)", () => {
       },
     })
 
-    const messages = createCollection(doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id }))
-    const files = createCollection(doCollectionOptions<File>({ transport, table: "files", getKey: (r) => r.id }))
+    const messages = createCollection(doCollectionOptions({ transport, table: "messages", getKey: (r) => r.id }))
+    const files = createCollection(doCollectionOptions({ transport, table: "files", getKey: (r) => r.id }))
     await Promise.all([messages.preload(), files.preload()])
 
     await messages.insert({ id: "m1", body: "hi" }).isPersisted.promise
