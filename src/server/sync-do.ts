@@ -370,7 +370,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
           const def = this.registry.mutations.get(`${f.collection}:${op.type}`)!
           const result = def.execute({ user, op, sql: this.sql, env: this.env }) as unknown
           if (result !== undefined && typeof (result as PromiseLike<unknown>).then === "function") {
-            throw new Error(`mutation '${f.collection}:${op.type}' execute must be synchronous`)
+            // `execute` runs inside transactionSync, which cannot await; an async
+            // execute also can't be atomic with its CDC rows. Do async work in
+            // `authorize` (pre-tx), `afterCommit` (post-commit), or a command.
+            throw new Error(
+              `mutation '${f.collection}:${op.type}' execute must be synchronous — do async work in authorize, afterCommit, or a command`,
+            )
           }
         }
       })

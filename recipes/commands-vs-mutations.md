@@ -90,6 +90,12 @@ returns the count.
 - You can type a command's args, either with a generic
   (`sync.command<{ before: number }>()(fn)`) or from a schema
   (`sync.command(zArgs, fn)`).
+- A mutation's `execute` must be synchronous, because it runs inside the
+  transaction that commits the row and its change-log entry together. Writing to
+  the Durable Object's own SQLite is synchronous, so this is the normal case. Do
+  any async work in `authorize` (it runs before the transaction), in
+  `afterCommit` (it runs after the commit), or in a command (it runs outside a
+  transaction).
 
 ## See also
 
