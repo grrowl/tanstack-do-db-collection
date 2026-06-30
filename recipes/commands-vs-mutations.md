@@ -85,10 +85,8 @@ returns the count.
 ## Notes
 
 - A mutation's `authorize` denies a write by throwing, and the client receives
-  that error message. A command's `authorize` can also throw to deny, but the
-  client receives a generic rejection and the server logs the message
-  (ADR-0012). If you need to tell the user why a command was refused, return that
-  in the result instead of throwing.
+  that error message. A command's `authorize` denies a call the same way, by
+  throwing.
 - You can type a command's args, either with a generic
   (`sync.command<{ before: number }>()(fn)`) or from a schema
   (`sync.command(zArgs, fn)`).
