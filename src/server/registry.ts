@@ -23,36 +23,31 @@
 import type { SqlStorage } from "@cloudflare/workers-types"
 import type { MutOp, RowOp } from "../wire/frames.ts"
 import { SYNC_PREFIX } from "./changes.ts"
+import type { StandardSchemaV1 } from "./standard-schema.ts"
+
+export type { StandardSchemaV1 }
 
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 // ---------------------------------------------------------------------------
 // Standard Schema — the dependency-free `~standard` interface that zod/valibot/
-// arktype all satisfy. We never import a validator.
+// arktype all satisfy, vendored verbatim in `./standard-schema.ts` (we import no
+// validator and add no dependency).
 //
-// On THIS branch a schema is used for TYPE inference only: a row schema on
-// `insert.schema` infers a collection's Row, and `command(schema, …)` infers a
-// command's Args. Runtime validation against these schemas is NOT wired here; it
-// lands in the stacked validation PR (see the tombstone notes in
-// `compileMutation`/`compileCommand`). When it lands it is a validation GATE, not
-// a parser: the handler receives the original wire value, never the schema's
-// parsed output, so a schema must not rely on transforms/defaults/coercion (input
-// must equal output). Rewriting a row the client already applied optimistically
-// would manufacture divergence, and a pk rewrite would break optimistic-id ==
+// A schema does double duty: it infers types (a row schema on `insert.schema`
+// infers a collection's Row, `command(schema, …)` infers a command's Args) AND it
+// validates at runtime. `compileSchema` calls `~standard.validate` before the
+// handler runs and throws on issues, rejecting the frame (fail loud).
+//
+// It is a validation GATE, not a parser: the handler receives the original wire
+// value — the schema's INPUT — never its parsed output. We infer from input
+// (`StandardSchemaV1.InferInput`), so `op.cols`/`args` describe exactly what the
+// handler gets; a transforming schema's output is validated but discarded, never
+// applied. Applying it would rewrite a row the client already holds optimistically
+// (manufacturing divergence), and a pk rewrite would break optimistic-id ==
 // confirmed-id (ADR-0001 D9).
 // ---------------------------------------------------------------------------
-export interface StandardSchemaV1<Output = unknown> {
-  readonly "~standard": {
-    readonly version: 1
-    readonly vendor: string
-    readonly validate: (value: unknown) => StandardResult<Output> | Promise<StandardResult<Output>>
-    readonly types?: { readonly input: unknown; readonly output: Output }
-  }
-}
-type StandardResult<Output> =
-  | { readonly value: Output; readonly issues?: undefined }
-  | { readonly issues: ReadonlyArray<{ readonly message: string }> }
-type InferSchema<S> = S extends StandardSchemaV1<infer O> ? O : never
+type InferSchema<S extends StandardSchemaV1> = StandardSchemaV1.InferInput<S>
 
 // ---------------------------------------------------------------------------
 // Collection identity (runtime) + per-op shapes.
@@ -96,21 +91,23 @@ export interface CommandCtx<TUser, Env = unknown, Args = unknown> {
 // Authoring types — the closed mutation trio + collection/command entries.
 //
 // `insert` and `update` each carry an optional `schema` (the row schema, and the
-// patch schema). On this branch the schema types `op.cols`; the stacked PR wires
-// runtime validation against it.
+// patch schema). The schema validates `op.cols` at runtime AND types it — for
+// `insert`, it is also the inference source for the collection's Row.
 // ---------------------------------------------------------------------------
 export interface InsertDef<TUser, Env, Row> {
-  /** Row schema. Validates the full-row `cols` (in the validation PR) and, when
-   *  used as the inference source, types the collection's Row. */
-  schema?: StandardSchemaV1<Row>
+  /** Row schema. Validates the full-row `cols` and, when used as the inference
+   *  source, types the collection's Row. `<Row, unknown>`: the schema's INPUT is
+   *  the Row (what the handler receives); its output is discarded (gate, not parser). */
+  schema?: StandardSchemaV1<Row, unknown>
   authorize?: (ctx: MutationCtx<TUser, Env, InsertOp<Row>>) => void | Promise<void>
   execute: (ctx: MutationCtx<TUser, Env, InsertOp<Row>>) => void
   afterCommit?: (ctx: MutationCtx<TUser, Env, InsertOp<Row>>) => unknown | Promise<unknown>
 }
 export interface UpdateDef<TUser, Env, Row> {
   /** Patch schema. The author supplies a PARTIAL schema (e.g. `Row.partial()`),
-   *  since an update carries a top-level partial patch, not a full row. */
-  schema?: StandardSchemaV1<Partial<Row>>
+   *  since an update carries a top-level partial patch, not a full row. Output is
+   *  discarded — only the INPUT (the patch shape the handler receives) is typed. */
+  schema?: StandardSchemaV1<Partial<Row>, unknown>
   authorize?: (ctx: MutationCtx<TUser, Env, UpdateOp<Row>>) => void | Promise<void>
   execute: (ctx: MutationCtx<TUser, Env, UpdateOp<Row>>) => void
   afterCommit?: (ctx: MutationCtx<TUser, Env, UpdateOp<Row>>) => unknown | Promise<unknown>
@@ -175,7 +172,9 @@ export type CommandInput<TUser, Env, Args, Result> =
 /** A command entry: carries Args and the (awaited) Result in the type. The
  *  phantoms let the client recover both from `typeof schema`. */
 export interface CommandEntry<TUser, Env, Args, Result> {
-  schema?: StandardSchemaV1<Args>
+  /** Args schema. `<Args, unknown>`: the schema's INPUT is the args the handler
+   *  receives; its output is discarded (gate, not parser). */
+  schema?: StandardSchemaV1<Args, unknown>
   authorize?: (ctx: CommandCtx<TUser, Env, Args>) => void | Promise<void>
   execute: (ctx: CommandCtx<TUser, Env, Args>) => Result | Promise<Result>
   /** phantoms — type-only carriers for client inference. */
@@ -317,10 +316,10 @@ const ROW_OPS = ["insert", "update", "delete"] as const
  * Compile an authored schema value into the flat dispatch tables, validating each
  * collection's identifiers (ADR-0007/0008).
  *
- * The per-op Standard Schema slots (`insert.schema`, `update.schema`, command
- * `schema`) type the author's `cols`/`args`, but on this branch they are NOT
- * enforced at runtime — runtime validation is wired in the stacked validation PR
- * (see the tombstone notes in `compileMutation`/`compileCommand`).
+ * When a per-op Standard Schema is present it is enforced at runtime:
+ * `insert.schema` validates the full-row `cols`, `update.schema` validates the
+ * partial patch, and a command `schema` validates `args` — each before the
+ * handler runs, throwing on issues (fail loud). A `delete` carries no cols.
  */
 export function compileSchema<TUser, Env>(schema: SyncSchema<TUser, Env>): CompiledSync<TUser, Env> {
   const collections = new Map<string, CollectionDef>()
@@ -355,19 +354,51 @@ function compileMutation<TUser, Env>(
   m: RuntimeMutationDef<TUser, Env>,
   schema: StandardSchemaV1 | undefined,
 ): RuntimeMutationDef<TUser, Env> {
-  // TOMBSTONE (base branch): the per-op `schema` (insert full-row, update partial)
-  // types `op.cols` for the author, but runtime validation is NOT wired here. It
-  // lands in the stacked validation PR, where this gates the write on `schema`.
-  // On this branch the schema is inert at runtime.
-  void type
-  void schema
-  return m
+  // Gate the write on the per-op schema when present: insert.schema validates the
+  // full-row cols, update.schema the partial patch. A delete carries no cols.
+  // Validation runs in authorize (before the transaction) and throws on issues.
+  if (!schema || type === "delete") return m
+  const userAuthorize = m.authorize
+  return {
+    authorize: async (ctx) => {
+      await validateStandard(schema, ctx.op.cols)
+      if (userAuthorize) await userAuthorize(ctx)
+    },
+    execute: m.execute,
+    afterCommit: m.afterCommit,
+  }
 }
 
 function compileCommand<TUser, Env>(entry: CommandEntry<TUser, Env, unknown, unknown>): RuntimeCommandDef<TUser, Env> {
-  // TOMBSTONE (base branch): the command `schema` types `args`; runtime validation
-  // is wired in the stacked validation PR.
-  return { authorize: entry.authorize, execute: entry.execute }
+  const userAuthorize = entry.authorize
+  const schema = entry.schema
+  if (!schema) return { authorize: userAuthorize, execute: entry.execute }
+  return {
+    authorize: async (ctx) => {
+      await validateStandard(schema, ctx.args)
+      if (userAuthorize) await userAuthorize(ctx)
+    },
+    execute: entry.execute,
+  }
+}
+
+/** Thrown by the validation gate on a schema failure. Carries the issue detail
+ *  and is surfaced to the client with a `VALIDATION` code, since bad input is the
+ *  caller's to fix. An `execute` error, by contrast, stays sanitized. */
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "ValidationError"
+  }
+}
+
+/** Run a Standard Schema's validator and throw `ValidationError` on issues. */
+async function validateStandard(schema: StandardSchemaV1, value: unknown): Promise<void> {
+  const result = await schema["~standard"].validate(value)
+  if ("issues" in result && result.issues) {
+    const detail = result.issues.map((i) => i.message).join("; ")
+    throw new ValidationError(`validation failed: ${detail}`)
+  }
 }
 
 /**

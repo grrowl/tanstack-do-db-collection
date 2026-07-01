@@ -3,8 +3,10 @@
 **Status:** Accepted. Supersedes [ADR-0001](./0001-sync-architecture.md) D11's
 `defineMutation`/`defineCommand` builder and the [ADR-0007](./0007-author-owned-schema-register-sync.md)
 `new SyncRegistry().defineCollection(…)` chain; closes the ADR-0010 manifest and
-its "typed command args" out-of-scope follow-up. Hard breaking change to the DO
-authoring API and the typed client surface (pre-1.0, clean break).
+its "typed command args" out-of-scope follow-up; revises [ADR-0012](./0012-wire-input-hardening.md)
+D3 so a command's `authorize`/validation errors surface like a mutation's. Hard
+breaking change to the DO authoring API and the typed client surface (pre-1.0,
+clean break).
 
 ## Context
 
@@ -28,8 +30,11 @@ We also had two genuinely different shapes wearing one builder. A **mutation**
 mirrors a row write — TanStack DB already names exactly `onInsert`/`onUpdate`/`onDelete`,
 and a synced write *is* one of those three. A **command** is an RPC: free-form
 args, a return value, its own atomicity, no collection. ADR-0010 lumped them as
-sibling `defineX` methods; ADR-0012 D3 had already found they diverge at runtime
-(a command's `authorize` throw is sanitized, a mutation's stays user-facing).
+sibling `defineX` methods, but they stay distinct in what's structural: a command
+owns its atomicity and may be async; a mutation is synchronous inside the
+transaction. (ADR-0012 D3 had also split their error surfacing — command
+`authorize` sanitized, mutation user-facing — but D2 below drops that, so
+surfacing is now uniform.)
 
 ## Decision
 
@@ -95,11 +100,12 @@ This is the open counterpart to the closed trio: anything that isn't one-row
 insert/update/delete (multi-row, cross-collection, compute-and-return, no write at
 all) is a command.
 
-The two shapes stay distinct at runtime exactly as ADR-0012 D3 found: a command's
-`authorize` throw is logged and surfaced as a generic rejection; a mutation's
-`authorize` throw is a distinct user-facing message. Keeping them separate
-helpers, rather than ADR-0010's sibling `defineX` methods, makes that divergence
-structural instead of incidental.
+They stay separate helpers because their shapes differ — a command is RPC with
+free args and a return value, a mutation is a typed row op — not because their
+errors differ. Error surfacing is now the **same** for both (revising ADR-0012
+D3, which had sanitized a command's `authorize`): a mutation and a command both
+surface their `authorize` and validation errors to the client, and both sanitize
+their `execute` errors. See D3.
 
 ### D3: The row schema lives on the insert mutation; it infers the row and validates writes
 
@@ -203,8 +209,9 @@ mut/call handler, `runSyncedWrite` is still the path (ADR-0006).
   patch, a command schema validates `args`; a `delete` is unvalidated (no cols, pk
   validated at insert). It validates but does not transform — the original value
   flows to handlers. Dependency-free via Standard Schema; no zod runtime pulled in.
-- **`authorize` divergence is now structural** (ADR-0012 D3): mutation-authorize
-  throws stay user-facing, command-authorize throws are sanitized — the two
-  helpers make that explicit rather than a shared-code accident.
+- **Uniform error surfacing (revises ADR-0012 D3).** Mutations and commands both
+  surface `authorize` and validation errors (a schema failure carries a
+  `VALIDATION` code) and both sanitize `execute` errors. ADR-0012 D3's
+  command-`authorize` sanitization is dropped, so the two behave the same.
 - **Per-DO contract.** Multi-DO apps run one transport and one `Api` per DO; there
   is no global command registry. Consistent with the per-connection cursor (0002).

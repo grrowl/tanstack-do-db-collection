@@ -45,9 +45,9 @@ Pick whichever you prefer.
 
 - Pass the row type as a generic: `sync.collection<Message>({ pk: "id", mutations })`.
 - Infer it from a schema on the insert mutation: `sync.collection({ pk: "id",
-  mutations: { insert: { schema: Message, execute } } })`. On this branch the
-  schema only infers the type. A runtime check against the schema is a separate
-  follow-up.
+  mutations: { insert: { schema: Message, execute } } })`. The schema infers the
+  type and also validates the value at runtime. See
+  `recipes/zod-standard-schema-collections.md`.
 
 ## Notes
 
@@ -62,3 +62,5 @@ Pick whichever you prefer.
 
 - ADR-0014 describes the schema as the shared contract.
 - `examples/chat` types its transport and collection from `ChatApi`.
+- `recipes/zod-standard-schema-collections.md` covers validating rows and command
+  args with a schema.
