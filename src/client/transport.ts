@@ -31,7 +31,11 @@ export interface SubHandler {
   onSnap(key: unknown, row: unknown): void
   onSnapEnd(): void
   onDelta(op: RowOp, key: unknown, cols: Record<string, unknown> | undefined): void
-  onUptodate(): void
+  /** `ownTerminal` is true only for a sub-scoped boundary addressed to THIS
+   *  subscription (a catch-up's terminal, ADR-0011 D3) — a transient
+   *  subscription may tear itself down on it, but never on a broadcast
+   *  boundary, which can precede its own catch-up frames. */
+  onUptodate(ownTerminal?: boolean): void
   onReset(): void
 }
 
@@ -43,6 +47,33 @@ export class MutationRejectedError extends Error {
     super(message)
     this.name = "MutationRejectedError"
   }
+}
+
+/** The transport surface `doCollectionOptions` consumes — structural, so the
+ *  WebSocket transport and the SSR snapshot transport are interchangeable
+ *  (ADR-0011 D2). Generic + branded on `Api` so row/table typing survives the
+ *  seam: `WebSocketTransport<Api>` and `SsrSnapshotTransport<Api>` both satisfy
+ *  it, and `doCollectionOptions` still infers the collection set from `Api`. */
+export interface Transport<Api = unknown> {
+  /** phantom — carries `Api` through the structural interface so inference at
+   *  `doCollectionOptions` recovers it (never `unknown`). */
+  readonly __api?: Api
+  connect(): Promise<void>
+  subscribe(
+    subId: string,
+    collection: string,
+    handler: SubHandler,
+    where?: unknown,
+    orderBy?: unknown,
+    limit?: number,
+    since?: string,
+  ): Promise<void>
+  unsubscribe(subId: string): void
+  sendMut(frame: Extract<ClientFrame, { t: "mut" }>): Promise<{ result?: unknown }>
+  fetch(frame: Extract<ClientFrame, { t: "fetch" }>): Promise<Array<unknown>>
+  close(): void
+  readonly appliedCursor: string
+  seedCursor(cursor: string): void
 }
 
 export interface TransportOptions {
@@ -116,6 +147,12 @@ export class WebSocketTransport<Api = unknown> {
   private intentionallyClosed = false
   /** True while reconnecting, so connect() resubscribes on success. */
   private reconnecting = false
+  /** True between a live cursor REGRESS (late hydration) and the reconnect
+   *  that replays from it. The old socket's already-queued boundary frames
+   *  would otherwise re-advance the cursor past the repair window — their
+   *  data still applies (idempotent), but the claim must hold at the seed
+   *  until the fresh socket's replay owns it. */
+  private suppressAdvance = false
   private readonly reconnectDelayMs: number
 
   constructor(opts: TransportOptions) {
@@ -137,6 +174,70 @@ export class WebSocketTransport<Api = unknown> {
     return String(this.appliedSeq)
   }
 
+  /**
+   * Claim a cursor position on behalf of externally-applied state — SSR
+   * hydration (ADR-0011 D3). The hydrated rows ARE the stream's prefix up to
+   * the dehydrated cursor, so claiming it keeps a bootstrap-window reconnect
+   * from re-snapshotting over them (a fresh snapshot carries no tombstones, so
+   * a row deleted server-side meanwhile would never be removed).
+   *
+   * The claim only ever SHRINKS relative to live progress: claiming a shorter
+   * applied prefix is always safe; claiming a longer one without data never
+   * is. A seed below the current position (a late streamed chunk — upstream
+   * has already applied its possibly-stale rows; there is no veto) regresses
+   * the cursor and resubscribes, so the catch-up replay re-freshens exactly
+   * the clobbered window. Replay is idempotent: latest-op-per-key, applied as
+   * upserts/deletes.
+   */
+  seedCursor(cursor: string): void {
+    const c = BigInt(cursor) // malformed cursor throws — fail loud, never guess
+    if (c <= 0n) return // "0" honestly means: no resume point to claim
+    if (c >= this.appliedSeq && this.appliedSeq !== 0n) return // never grow the claim
+    const wasLive = this.appliedSeq !== 0n && this.ws !== null
+    this.appliedSeq = c
+    if (wasLive && this.handlers.size > 0) {
+      // A live regress cannot replay on the SAME socket: boundary frames the
+      // server already sent (full duplex) would dispatch after the regress
+      // and re-advance the cursor past the repair window — then a drop
+      // resumes beyond it and the late chunk's clobbered rows stay stale
+      // forever. Force a reconnect instead: the old socket's queued frames
+      // stop counting (advance suppressed; their data still applies,
+      // idempotently), and the FRESH socket resubscribes from the seed —
+      // clean ordering, replay guaranteed.
+      this.suppressAdvance = true
+      this.forceReconnect()
+    }
+  }
+
+  /** Abandon the current socket and reconnect. Teardown is explicit — a
+   *  locally-initiated close does not reliably fire our own close event in
+   *  every runtime, and the close handler ignores abandoned sockets. */
+  private forceReconnect(): void {
+    const old = this.ws
+    this.ws = null
+    this.connectPromise = null
+    try {
+      old?.close()
+    } catch {
+      /* already dead; the reconnect proceeds regardless */
+    }
+    this.scheduleReconnect()
+  }
+
+  private scheduleReconnect(): void {
+    // The flag is set at SCHEDULING time, not in the timer: a demand-driven
+    // connect() (a mutation inside the reconnect window) may establish the
+    // fresh socket first, and it must run the resubscribe path too — or
+    // every subscription is silently dead on the new socket and the late
+    // timer wedges the flag (pre-existing bug, found in the ADR-0011 grill).
+    this.reconnecting = true
+    setTimeout(() => {
+      void this.connect().catch(() => {
+        /* next attempt retries on the following close */
+      })
+    }, this.reconnectDelayMs)
+  }
+
   async connect(): Promise<void> {
     if (this.ws) return
     if (this.connectPromise) return this.connectPromise
@@ -152,29 +253,20 @@ export class WebSocketTransport<Api = unknown> {
       }
       ws.addEventListener("message", (ev) => this.onMessage(ev.data))
       ws.addEventListener("close", () => {
+        // A close for a socket we already abandoned (forceReconnect tore it
+        // down, or a newer connection is live) must not double-schedule.
+        if (this.ws !== ws) return
         this.ws = null
         this.connectPromise = null
         // Auto-reconnect on an unexpected drop while subscriptions are active.
-        if (!this.intentionallyClosed && this.handlers.size > 0) {
-          // The flag is set at SCHEDULING time, not in the timer: a demand-
-          // driven connect() (a mutation inside the reconnect window) may
-          // establish the fresh socket first, and it must run the resubscribe
-          // path too — or every subscription is silently dead on the new
-          // socket and the late timer wedges the flag (pre-existing bug, found
-          // in the ADR-0011 grill).
-          this.reconnecting = true
-          setTimeout(() => {
-            void this.connect().catch(() => {
-              /* next attempt retries on the following close */
-            })
-          }, this.reconnectDelayMs)
-        }
+        if (!this.intentionallyClosed && this.handlers.size > 0) this.scheduleReconnect()
       })
       this.ws = ws
       // On a reconnect, re-establish every subscription from our single applied
       // cursor so the server serves a windowed catch-up rather than a snapshot.
       if (this.reconnecting) {
         this.reconnecting = false
+        this.suppressAdvance = false // the fresh socket's frames own the cursor again
         this.resubscribeAll()
       }
     })()
@@ -184,14 +276,7 @@ export class WebSocketTransport<Api = unknown> {
     // live — otherwise one unreachable attempt wedges the transport forever.
     this.connectPromise.catch(() => {
       this.connectPromise = null
-      if (!this.intentionallyClosed && this.handlers.size > 0) {
-        this.reconnecting = true
-        setTimeout(() => {
-          void this.connect().catch(() => {
-            /* next attempt retries on the following close */
-          })
-        }, this.reconnectDelayMs)
-      }
+      if (!this.intentionallyClosed && this.handlers.size > 0) this.scheduleReconnect()
     })
     return this.connectPromise
   }
@@ -244,10 +329,13 @@ export class WebSocketTransport<Api = unknown> {
     where?: unknown,
     orderBy?: unknown,
     limit?: number,
+    /** Resume point for the FIRST sub — SSR hydration's dehydrated cursor
+     *  (ADR-0011 D3). One-shot: reconnects resume from `appliedCursor`. */
+    since?: string,
   ): Promise<void> {
     this.handlers.set(subId, { handler, collection, where, orderBy, limit })
     await this.connect()
-    this.sendFrame({ t: "sub", subId, collection, where, orderBy, limit })
+    this.sendFrame({ t: "sub", subId, collection, where, orderBy, limit, since })
   }
 
   unsubscribe(subId: string): void {
@@ -349,7 +437,10 @@ export class WebSocketTransport<Api = unknown> {
         this.handlers.get(frame.sub)?.handler.onDelta(frame.op, frame.key, frame.cols)
         return
       case "uptodate":
-        for (const { handler } of this.handlers.values()) handler.onUptodate()
+        // A sub-scoped terminal (a catch-up's) goes to its handler alone; a
+        // broadcast boundary (coalescer tick / barrier flush) goes to all.
+        if (frame.sub) this.handlers.get(frame.sub)?.handler.onUptodate(true)
+        else for (const { handler } of this.handlers.values()) handler.onUptodate(false)
         this.advance(frame.seq)
         return
       case "committed": {
@@ -388,6 +479,7 @@ export class WebSocketTransport<Api = unknown> {
   }
 
   private advance(seq: string): void {
+    if (this.suppressAdvance) return // stale pre-regress boundaries don't count
     const s = BigInt(seq)
     if (s > this.appliedSeq) this.appliedSeq = s
     if (this.seqWaiters.length === 0) return
