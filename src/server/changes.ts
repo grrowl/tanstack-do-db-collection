@@ -172,6 +172,17 @@ export function currentSeq(sql: SqlStorage): number {
   return Number(rows[0]?.s ?? 0)
 }
 
+/**
+ * Durable high-water mark — the latest position the stream has reached, robust
+ * to retention pruning the changelog empty (`currentSeq` alone reads 0 then,
+ * which would hand SSR a bogus "no history" cursor for live rows; ADR-0011 D1).
+ * The drain cursor lives in `_sync_meta` and survives pruning; an undrained
+ * tail is covered by the MAX over the log itself.
+ */
+export function highWaterSeq(sql: SqlStorage): number {
+  return Math.max(currentSeq(sql), getDrainCursor(sql))
+}
+
 /** Lowest `seq` still in the log — the retention floor for reconnect catch-up. */
 export function minChangeSeq(sql: SqlStorage): number {
   const rows = Array.from(

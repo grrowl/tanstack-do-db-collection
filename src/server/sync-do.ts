@@ -21,6 +21,7 @@ import {
   currentSeq,
   ensureTriggers,
   getDrainCursor,
+  highWaterSeq,
   hydrateRows,
   initSchema,
   minChangeSeq,
@@ -126,6 +127,44 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
    */
   protected parseAttachment(_req: Request): TUser | Promise<TUser> {
     return undefined as TUser
+  }
+
+  /**
+   * One consistent snapshot of a collection plus a durable resume cursor,
+   * WITHOUT a WebSocket — the SSR read path (ADR-0011 D1). Throws on an
+   * unknown collection or an un-lowerable predicate (fail loud; RPC
+   * propagates the error to the caller).
+   *
+   * `request` is REQUIRED and runs through the SAME gate as the WS upgrade:
+   * `parseAttachment` — pass the claims-bearing Request the worker already
+   * forges (or forwards) for the socket path. One hook guards both paths, so
+   * an author's tenant check cannot be silently bypassed by the read path
+   * (and the minted claims are the seam where uniform read-scoping would
+   * land, on subs and snapshots alike). A rejecting parseAttachment rejects
+   * the RPC. The await happens BEFORE the reads: rows and cursor are still
+   * taken at one position (synchronous SQLite, no await between them).
+   *
+   * The cursor is the durable high-water mark, not bare `currentSeq` — see
+   * `highWaterSeq`. A cursor of "0" honestly means "no resume point" and the
+   * client must reconcile a fresh snapshot instead of catching up.
+   */
+  async readSyncSnapshot(
+    req: { collection: string; where?: unknown; orderBy?: unknown; limit?: number },
+    request: Request,
+  ): Promise<{
+    rows: Array<Record<string, SqlStorageValue>>
+    cursor: string
+  }> {
+    await this.parseAttachment(request) // the one gate (claims unused until read-scoping exists)
+    const coll = this.registry.collections.get(req.collection)
+    if (!coll) throw new Error(`readSyncSnapshot: unknown collection '${req.collection}'`)
+    const query = compileSubsetQuery(req.collection, {
+      where: req.where,
+      orderBy: req.orderBy,
+      limit: req.limit,
+    })
+    const rows = Array.from(this.sql.exec(query.sql, ...query.params)) as Array<Record<string, SqlStorageValue>>
+    return { rows, cursor: String(highWaterSeq(this.sql)) }
   }
 
   override async fetch(req: Request): Promise<Response> {
@@ -700,7 +739,9 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
         this.send(ws, { t: "d", sub: sub.subId, key, op: change.op, cols: row, seq })
       }
     }
-    this.send(ws, { t: "uptodate", seq })
+    // Sub-scoped terminal: this catch-up is one subscription's bootstrap, not
+    // a socket-wide boundary (ADR-0011 D3). Still advances the client cursor.
+    this.send(ws, { t: "uptodate", seq, sub: sub.subId })
   }
 
   /** Encode and send a server frame on one socket. */
