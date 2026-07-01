@@ -270,12 +270,31 @@ browser-verified.
   scroll-back, and a mutable order key so voting bumps a task to the top
   (move-in). Its firehose makes the deferred bounded-window-under-churn
   limitation visible — `loaded` climbs past `window`.
+- **[`examples/multi-do`](./examples/multi-do)** — two separate DOs (a room and
+  an inbox) behind one Worker: one transport per DO, each typed by its own `Api`
+  so `transport.call.*` is scoped to that DO's commands, and a cross-DO feed
+  merged client-side (the DO never joins — ADR-0001).
 
 > [!TIP]
 > Using on-demand with `orderBy` + `limit`? Add a **range index** on the order
 > column (`collection.createIndex((r) => r.field, { indexType: BTreeIndex })`) —
 > without it the window can't page lazily and falls back to loading the whole
 > subset. See `examples/board`.
+
+---
+
+## Common patterns and recipes
+
+Task-oriented guides in [`recipes/`](./recipes):
+
+- **[Commands vs mutations](./recipes/commands-vs-mutations.md)** — when a write
+  is a typed `insert`/`update`/`delete` and when it's a named command.
+- **[End-to-end types](./recipes/end-to-end-types.md)** — share one schema type
+  between server and client so the transport, commands, and collections are typed.
+- **[On-demand and windows](./recipes/on-demand-and-windows.md)** — sync only the
+  rows a query asks for, and grow a bounded window as the user scrolls.
+- **[Server-originated writes](./recipes/server-originated-writes.md)** — write
+  rows from the DO itself (webhooks, jobs, seeds) so clients still see them.
 
 ---
 

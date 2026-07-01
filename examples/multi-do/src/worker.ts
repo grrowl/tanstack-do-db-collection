@@ -50,6 +50,12 @@ export class InboxDO extends SyncDurableObject<Env, Claims> {
     })
   }
 
+  // Like RoomDO, the example trusts a `user` query param for identity. NOTE the
+  // path (`/inbox/:user`) names the DO while `?user=` names the caller — the
+  // example does not bind them, so `/inbox/alice/sync?user=bob` would let bob
+  // into alice's inbox. A real app verifies a token at the Worker and either
+  // rejects a path/caller mismatch there or authorizes each inbox write against
+  // the DO owner; the per-user boundary here is illustrative, not enforced.
   protected override parseAttachment(req: Request): Claims {
     return { userId: new URL(req.url).searchParams.get("user") ?? "anon" }
   }
