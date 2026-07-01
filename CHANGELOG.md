@@ -27,6 +27,29 @@ While pre-1.0, the public API may change between 0.x releases.
   transforms, defaults, or coercion. See
   `recipes/zod-standard-schema-collections.md`.
 
+- **SSR support (experimental — ADR-0011; tracks TanStack DB draft PR
+  [#1564](https://github.com/TanStack/db/pull/1564), whose hook signatures may
+  change).** Dehydrate on the worker, hydrate to the cursor. Installs and
+  imports against a released `@tanstack/db`, but is **dormant until paired with
+  the PR #1564 build** (`dehydrate`/`hydrate`/`DbClient` are upstream and
+  unreleased):
+  - `SyncDurableObject.readSyncSnapshot({ collection, where?, orderBy?, limit? }, request)`
+    — one consistent `{ rows, cursor }` read over the DO binding, no WebSocket.
+    The required `request` runs through `parseAttachment` — the same auth gate
+    as the WS upgrade, so one tenant check guards both paths. The cursor is a
+    durable high-water mark; `"0"` honestly means "no resume point".
+  - `SsrSnapshotTransport` — runs the same `doCollectionOptions` inside a
+    per-request server `DbClient`; read-only, writes throw `SsrReadOnlyError`.
+    Create one per request.
+  - `doCollectionOptions` now implements `exportSyncMeta` / `importSyncMeta` /
+    `mergeSyncMeta` (`{ v: 1, cursor }`, opaque to TanStack; inert on older
+    `@tanstack/db`). A hydrated collection is ready immediately
+    (stale-while-revalidate), resumes its first sub from the dehydrated cursor
+    (honest reset below the retention floor), and with no resume point
+    reconciles a fresh snapshot as authoritative set semantics — no
+    flash-to-empty, no stranded deletes. The cursor is fingerprinted to the
+    eager `where`; a changed filter downgrades to snapshot reconcile.
+
 ## [0.4.0] — 2026-07-01
 
 ### Changed
