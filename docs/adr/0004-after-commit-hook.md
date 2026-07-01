@@ -22,7 +22,7 @@ The two obvious homes are both wrong:
   there cannot be awaited, holds the write path, and is not atomic with the
   external system — the transaction can roll back but R2 cannot.
 
-A `command` (`defineCommand`) *can* do async work in `execute` (it runs outside
+A `command` *can* do async work in `execute` (it runs outside
 any transaction), and remains the right tool for RPC-shaped operations. But it
 is not the collection's optimistic mutation path, and its only durability is
 client-retry-driven dedup. We still want post-work attached to ordinary

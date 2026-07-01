@@ -3,6 +3,7 @@ import { SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions } from "../src/client/do-collection.ts"
 import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: the entire reactive layer (filtering, joins, incremental view
 // maintenance) is the client's job — the DO only stores + emits, never runs
@@ -10,13 +11,8 @@ import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.
 // DO-backed collection and updates incrementally as synced data changes: the DO
 // streams every row, the client's IVM derives the filtered view.
 
-interface Msg {
-  id: string
-  body: string
-}
-
-function makeTransport(room: string): WebSocketTransport {
-  return new WebSocketTransport({
+function makeTransport(room: string): WebSocketTransport<TestApi> {
+  return new WebSocketTransport<TestApi>({
     url: `https://example.com/sync/${room}`,
     open: async () => {
       const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
@@ -40,7 +36,7 @@ describe("client live query / IVM over a DO-backed collection (M8)", () => {
   it("derives a filtered view client-side and updates it incrementally", async () => {
     const t = makeTransport("lq")
     await t.connect()
-    const messages = createCollection(doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (r) => r.id }))
+    const messages = createCollection(doCollectionOptions({ transport: t, table: "messages", getKey: (r) => r.id }))
     await messages.preload()
 
     // A live query filtering client-side — the DO sends every row; IVM filters.

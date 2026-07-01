@@ -7,13 +7,7 @@ import { useState } from "react"
 import { createRoot } from "react-dom/client"
 import { ulid } from "ulid"
 import { doCollectionOptions, WebSocketTransport } from "../../../src/client/index.ts"
-
-interface Message {
-  id: string
-  author: string
-  content: string
-  created_at: number
-}
+import type { ChatApi } from "./worker.ts"
 
 // A throwaway identity persisted per browser, passed to the DO as ?user=.
 const user =
@@ -25,13 +19,14 @@ const user =
   })()
 
 const wsProto = location.protocol === "https:" ? "wss:" : "ws:"
-const transport = new WebSocketTransport({
+const transport = new WebSocketTransport<ChatApi>({
   url: `${wsProto}//${location.host}/sync?room=lobby&user=${encodeURIComponent(user)}`,
 })
 
-// One transport per DO, shared by every collection on it.
+// One transport per DO, shared by every collection on it. The Row type is
+// inferred from ChatApi + the table name — no runtime schema value needed.
 const messages = createCollection(
-  doCollectionOptions<Message>({ transport, table: "messages", getKey: (m) => m.id }),
+  doCollectionOptions({ transport, table: "messages", getKey: (m) => m.id }),
 )
 
 function App(): JSX.Element {
@@ -46,9 +41,28 @@ function App(): JSX.Element {
     setText("")
   }
 
+  // "Clear the room" is a COMMAND, not a mutation — it isn't a typed single-row
+  // write, so it goes over transport.sendCall (RPC), not the collection. Its
+  // server-side DELETE broadcasts delete deltas to every tab (this one included,
+  // via the live query), and resolves with the count it removed.
+  const clear = async (): Promise<void> => {
+    const { deleted } = await transport.call.clearRoom()
+    console.log(`cleared ${deleted} message(s)`)
+  }
+
   return (
     <div style={{ fontFamily: "system-ui, sans-serif", maxWidth: 640, margin: "2rem auto", padding: "0 1rem" }}>
-      <h2 style={{ marginBottom: 4 }}>tanstack-do-db chat</h2>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+        <h2 style={{ marginBottom: 4 }}>tanstack-do-db chat</h2>
+        <button
+          type="button"
+          onClick={() => void clear()}
+          disabled={data.length === 0}
+          style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid #ccc", background: "#fff" }}
+        >
+          clear room
+        </button>
+      </div>
       <p style={{ color: "#666", marginTop: 0 }}>
         you are <b>{user}</b> · open a second tab to watch live sync
       </p>

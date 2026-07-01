@@ -31,16 +31,16 @@ import {
 } from "./changes.ts"
 import { Broadcaster } from "./broadcast.ts"
 import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx, sweepDedup } from "./dedup.ts"
-import type { SyncRegistry } from "./registry.ts"
+import { compileSchema, type CompiledSync, type SyncSchema } from "./registry.ts"
 import { andPredicates, compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
 import { SubscriptionRegistry, type Sub } from "./subscriptions.ts"
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends DurableObject<Env> {
-  /** Set by `registerSync` — the collections/mutations/commands this DO serves. */
-  #registry: SyncRegistry<TUser, Env> | undefined
+  /** Set by `registerSync` — the compiled dispatch tables this DO serves. */
+  #registry: CompiledSync<TUser, Env> | undefined
 
-  /** The registered registry. Throws if `registerSync` hasn't run yet (ADR-0007). */
-  protected get registry(): SyncRegistry<TUser, Env> {
+  /** The compiled schema. Throws if `registerSync` hasn't run yet (ADR-0007). */
+  protected get registry(): CompiledSync<TUser, Env> {
     if (!this.#registry) {
       throw new Error(
         "sync not registered — call this.registerSync(registry) in your constructor's " +
@@ -112,10 +112,11 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
    * `blockConcurrencyWhile`, after migrating. Idempotent; re-callable to update
    * the whole trigger state when the registry changes.
    */
-  protected registerSync(registry: SyncRegistry<TUser, Env>): void {
+  protected registerSync(schema: SyncSchema<TUser, Env>): void {
+    const compiled = compileSchema(schema)
     initSchema(this.sql)
-    ensureTriggers(this.sql, registry.collections.values())
-    this.#registry = registry
+    ensureTriggers(this.sql, compiled.collections.values())
+    this.#registry = compiled
   }
 
   /**
@@ -369,7 +370,12 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
           const def = this.registry.mutations.get(`${f.collection}:${op.type}`)!
           const result = def.execute({ user, op, sql: this.sql, env: this.env }) as unknown
           if (result !== undefined && typeof (result as PromiseLike<unknown>).then === "function") {
-            throw new Error(`mutation '${f.collection}:${op.type}' execute must be synchronous`)
+            // `execute` runs inside transactionSync, which cannot await; an async
+            // execute also can't be atomic with its CDC rows. Do async work in
+            // `authorize` (pre-tx), `afterCommit` (post-commit), or a command.
+            throw new Error(
+              `mutation '${f.collection}:${op.type}' execute must be synchronous — do async work in authorize, afterCommit, or a command`,
+            )
           }
         }
       })

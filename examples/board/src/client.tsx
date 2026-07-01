@@ -16,6 +16,7 @@ import { useEffect, useRef, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { ulid } from "ulid"
 import { doCollectionOptions, WebSocketTransport } from "../../../src/client/index.ts"
+import type { BoardApi } from "./worker.ts"
 
 interface Task {
   id: string
@@ -28,9 +29,10 @@ interface Task {
 const room = new URLSearchParams(location.search).get("room") ?? "demo"
 const qs = `room=${encodeURIComponent(room)}`
 const wsProto = location.protocol === "https:" ? "wss:" : "ws:"
-const transport = new WebSocketTransport({ url: `${wsProto}//${location.host}/sync?${qs}` })
+const transport = new WebSocketTransport<BoardApi>({ url: `${wsProto}//${location.host}/sync?${qs}` })
 const tasks = createCollection(
-  doCollectionOptions<Task>({ transport, table: "tasks", getKey: (t) => t.id, syncMode: "on-demand" }),
+  // Row (Task) is inferred from BoardApi + the "tasks" table — no runtime schema.
+  doCollectionOptions({ transport, table: "tasks", getKey: (t) => t.id, syncMode: "on-demand" }),
 )
 // A range index on the order column lets the live query page lazily via the
 // cursor instead of falling back to loading the whole subset. BTreeIndex suits

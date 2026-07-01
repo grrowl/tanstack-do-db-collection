@@ -8,7 +8,7 @@ explains the displacement.
 | # | Title | Status |
 |---|---|---|
 | [0000](./0000-record-architecture-decisions.md) | Record architecture decisions | Accepted |
-| [0001](./0001-sync-architecture.md) | Sync architecture: single-ordered-stream over a Durable Object | Accepted (amended by 0002) |
+| [0001](./0001-sync-architecture.md) | Sync architecture: single-ordered-stream over a Durable Object | Accepted (amended by 0002; D11 builder superseded by 0014) |
 | [0002](./0002-adversarial-review-corrections.md) | Corrections from adversarial review: ordering, shaping, retention | Accepted (C5 retention refined by 0009) |
 | [0003](./0003-atomic-cursor-fetch.md) | Cursor load-more is one atomic fetch, not two | Accepted (naming amended by 0005) |
 | [0004](./0004-after-commit-hook.md) | Side effects go in a fire-and-forget `afterCommit`, not the transaction | Accepted |
@@ -17,6 +17,7 @@ explains the displacement.
 | [0007](./0007-author-owned-schema-register-sync.md) | Author-owned schema; `registerSync` wires the sync | Accepted |
 | [0008](./0008-orphaned-cdc-triggers.md) | Orphaned CDC triggers when a collection is removed | Accepted |
 | [0009](./0009-changelog-time-retention.md) | Changelog time-based retention; reset stale reconnects | Accepted |
-| [0010](./0010-typed-mutations-collection-manifest.md) | Typed mutations via a collection-row manifest on `SyncRegistry` | Accepted |
+| [0010](./0010-typed-mutations-collection-manifest.md) | Typed mutations via a collection-row manifest on `SyncRegistry` | Accepted (manifest superseded by 0014) |
 | [0012](./0012-wire-input-hardening.md) | Wire-input hardening: frame-shape guards, inbound limits, sanitized execute errors | Accepted |
 | [0013](./0013-predicate-floor-one-evaluator.md) | Filtered-subscription membership: one evaluator is the source of truth; the floor is the verified-agreeing set | Accepted |
+| [0014](./0014-object-sync-schema.md) | `defineSync`: one schema value, mutations on the collection, commands on the connection | Accepted (supersedes 0001 D11 builder; closes 0010 manifest) |

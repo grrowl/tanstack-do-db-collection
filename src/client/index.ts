@@ -14,4 +14,4 @@ export {
 } from "./transport.ts"
 export type { SubHandler, TransportOptions, WebSocketLike } from "./transport.ts"
 export { doCollectionOptions, WriteOutsideSubError } from "./do-collection.ts"
-export type { DoCollectionOptions } from "./do-collection.ts"
+export type { CollectionName, DoApiCollectionOptions, RowOf } from "./do-collection.ts"

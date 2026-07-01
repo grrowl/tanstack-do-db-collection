@@ -3,6 +3,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions } from "../src/client/do-collection.ts"
 import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: a catch-up (reconnect or SSR hydration) emits the LATEST CDC op per
 // changed key. A key that was deleted-and-reinserted while the client was away
@@ -14,13 +15,8 @@ import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.
 // held-key "insert" as the upsert it semantically is (ADR-0011 D4) — the same
 // update-upsert contract move-in already relies on (ADR-0002 C4).
 
-interface Msg {
-  id: string
-  body: string
-}
-
-function makeTransport(room: string): WebSocketTransport {
-  return new WebSocketTransport({
+function makeTransport(room: string): WebSocketTransport<TestApi> {
+  return new WebSocketTransport<TestApi>({
     url: `https://example.com/sync/${room}`,
     reconnectDelayMs: 20,
     open: async () => {
@@ -53,7 +49,7 @@ describe("catch-up reinsert lands as an upsert, not a DuplicateKeySyncError", ()
       s.storage.sql.exec("INSERT INTO messages(id,body) VALUES('k','v1')")
     })
 
-    const messages = createCollection(doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (r) => r.id }))
+    const messages = createCollection(doCollectionOptions({ transport: t, table: "messages", getKey: (r) => r.id }))
     await messages.preload()
     expect(messages.get("k")).toMatchObject({ id: "k", body: "v1" })
 

@@ -3,6 +3,7 @@ import type { SqlStorage } from "@cloudflare/workers-types"
 import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions, type WebSocketLike, WebSocketTransport } from "../src/client/index.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: server-originated writes (an agent inserting a row, a webhook, a cron
 // job, a bulk seed) live outside the client mutation flow — no txId, no receipt.
@@ -11,11 +12,6 @@ import { doCollectionOptions, type WebSocketLike, WebSocketTransport } from "../
 // A raw `sql.exec` without it fires the triggers but never broadcasts until some
 // later mutation drains the backlog.
 
-interface Msg {
-  id: string
-  body: string
-}
-
 // runSyncedWrite is protected (subclass-facing); reach it in the test via the
 // in-DO instance. registerSync already ran in the DO constructor (ADR-0007).
 type ServerApi = {
@@ -23,8 +19,8 @@ type ServerApi = {
 }
 const api = (i: unknown): ServerApi => i as unknown as ServerApi
 
-function realTransport(room: string): WebSocketTransport {
-  return new WebSocketTransport({
+function realTransport(room: string): WebSocketTransport<TestApi> {
+  return new WebSocketTransport<TestApi>({
     url: `https://example.com/sync/${room}`,
     open: async () => {
       const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
@@ -50,7 +46,7 @@ describe("runSyncedWrite (ADR-0006) — server-originated writes", () => {
     const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
     const t = realTransport(room)
     await t.connect() // constructing the DO already ran registerSync (ADR-0007)
-    const messages = createCollection(doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id }))
+    const messages = createCollection(doCollectionOptions({ transport: t, table: "messages", getKey: (m) => m.id }))
     await messages.preload()
     expect(messages.size).toBe(0)
 
@@ -74,7 +70,7 @@ describe("runSyncedWrite (ADR-0006) — server-originated writes", () => {
 
     const t = realTransport(room)
     await t.connect()
-    const messages = createCollection(doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (m) => m.id }))
+    const messages = createCollection(doCollectionOptions({ transport: t, table: "messages", getKey: (m) => m.id }))
     await messages.preload()
     await waitFor(() => messages.get("agent2") !== undefined)
     expect(messages.get("agent2")).toMatchObject({ id: "agent2", body: "queued" })

@@ -2,6 +2,7 @@ import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { doCollectionOptions } from "../src/client/do-collection.ts"
 import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: the adapter is the seam between the transport and TanStack DB's sync
 // API. createCollection just consumes the config it returns, so the behaviour
@@ -17,8 +18,8 @@ interface Msg {
   body: string
 }
 
-function connect(room: string): Promise<WebSocketTransport> {
-  const t = new WebSocketTransport({
+function connect(room: string): Promise<WebSocketTransport<TestApi>> {
+  const t = new WebSocketTransport<TestApi>({
     url: `https://example.com/sync/${room}`,
     open: async () => {
       const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
@@ -42,9 +43,9 @@ async function waitFor(pred: () => boolean, timeoutMs = 2000): Promise<void> {
 type Call = [string, unknown?]
 
 /** Spy sync controls + the bound sync function from a fresh adapter. */
-function startSync(transport: WebSocketTransport): { calls: Array<Call> } {
+function startSync(transport: WebSocketTransport<TestApi>): { calls: Array<Call> } {
   const calls: Array<Call> = []
-  const opts = doCollectionOptions<Msg>({ transport, table: "messages", getKey: (r) => r.id })
+  const opts = doCollectionOptions({ transport, table: "messages", getKey: (r) => r.id })
   // sync lives on opts.sync.sync; invoke with spy controls (cast: type-only dep).
   const syncConfig = (opts as unknown as { sync: { sync: (p: unknown) => void } }).sync
   syncConfig.sync({
@@ -90,7 +91,7 @@ describe("doCollectionOptions (M3 adapter)", () => {
   it("sends a mut and lands the confirming delta as a synced write before resolving", async () => {
     const room = "dc-mut"
     const t = await connect(room)
-    const adapter = doCollectionOptions<Msg>({ transport: t, table: "messages", getKey: (r) => r.id })
+    const adapter = doCollectionOptions({ transport: t, table: "messages", getKey: (r) => r.id })
     const calls: Array<Call> = []
     ;(adapter as unknown as { sync: { sync: (p: unknown) => void } }).sync.sync({
       collection: { get: () => undefined },

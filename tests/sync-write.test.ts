@@ -44,6 +44,16 @@ function send(ws: WebSocket, frame: ClientFrame): void {
   ws.send(codec.encode(frame))
 }
 
+/** Poll until `pred` holds — for a non-originating subscriber's deltas, which
+ *  arrive on the coalescer tick (no `committed` to await on). */
+async function waitFor(pred: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timeout")
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
 /** Subscribe and wait for the initial snap-end so later frames are post-sub. */
 async function subscribe(ws: WebSocket, subId: string): Promise<void> {
   send(ws, { t: "sub", subId, collection: "messages" })
@@ -115,6 +125,44 @@ describe("write path: single-stream confirmation (M3)", () => {
     const committed = frames.find((f) => f.t === "committed") as Extract<ServerFrame, { t: "committed" }>
     expect(committed.result).toEqual({ echoed: { n: 7 } })
     ws.close()
+  })
+
+  it("a SQL-writing command broadcasts its row changes AND returns a result", async () => {
+    // WHY: a command isn't only RPC — its `sql` writes hit the same CDC triggers
+    // a mutation's do, so they fan out to OTHER subscribers as ordinary deltas,
+    // while the caller also gets a result. This pins that dual path (the chat
+    // `clearRoom` example relies on it): B never originated the call yet must see
+    // the deletes; A gets the count back. A typed mutation can do neither half.
+    const a = await openWs("/sync/w-cmd-clear")
+    const b = await openWs("/sync/w-cmd-clear") // same room → same DO
+    await subscribe(a, "sa")
+    await subscribe(b, "sb")
+
+    // B is a passive subscriber: collect every delta it receives (it never
+    // originates a write, so it gets `d` frames, never `committed`).
+    const bDeltas: Array<Extract<ServerFrame, { t: "d" }>> = []
+    b.addEventListener("message", (e: MessageEvent) => {
+      const f = codec.decode(e.data as ArrayBuffer) as ServerFrame
+      if (f.t === "d") bDeltas.push(f)
+    })
+
+    // Seed two rows via A; wait until B has observed both inserts.
+    send(a, { t: "mut", txId: "i1", collection: "messages", ops: [{ type: "insert", key: "a", cols: { id: "a", body: "one" } }] })
+    send(a, { t: "mut", txId: "i2", collection: "messages", ops: [{ type: "insert", key: "b", cols: { id: "b", body: "two" } }] })
+    await waitFor(() => bDeltas.filter((d) => d.op === "insert").length === 2)
+
+    // A invokes the SQL-writing command.
+    send(a, { t: "call", txId: "c1", name: "clearMessages", args: {} })
+    const frames = await collectUntil(a, (f) => f.t === "committed" && f.txId === "c1")
+    const committed = frames.find((f) => f.t === "committed") as Extract<ServerFrame, { t: "committed" }>
+    expect(committed.result).toEqual({ deleted: 2 }) // the result channel
+
+    // …and B (which never called it) sees both rows removed as delete deltas.
+    await waitFor(() => bDeltas.filter((d) => d.op === "delete").length === 2)
+    expect(new Set(bDeltas.filter((d) => d.op === "delete").map((d) => d.key))).toEqual(new Set(["a", "b"]))
+
+    a.close()
+    b.close()
   })
 
   it("fans an update and a delete to a subscriber as deltas", async () => {

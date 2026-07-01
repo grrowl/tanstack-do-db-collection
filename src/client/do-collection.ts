@@ -28,23 +28,19 @@ export class WriteOutsideSubError extends Error {
   }
 }
 
-export interface DoCollectionOptions<T extends object> {
-  /** One transport per DO; shared by all collections on that DO. */
-  transport: WebSocketTransport
-  /** Collection (table) name on the DO. */
-  table: string
-  /** Stable client-supplied key extractor (must match the server pk). */
-  getKey: (row: T) => string
-  /** Collection id; defaults to the table name. */
-  id?: string
-  /**
-   * 'eager' (default) syncs the whole collection (optionally filtered by
-   * `where`). 'on-demand' syncs only the subsets that live queries request.
-   */
-  syncMode?: "eager" | "on-demand"
-  /** Eager-mode server-side filter + write preflight (a @tanstack/db IR). */
-  where?: unknown
-}
+// --- Row inference from a schema Api (`typeof schema`) ----------------------
+// Mirrors the transport's command projection: structural-only, recovering a
+// collection's Row from the phantom `__row` the server's `CollectionEntry`
+// carries. The client needs NO runtime schema value — just the Api type.
+type CollectionsOf<Api> = Api extends { collections: infer C } ? C : never
+/** Table names declared on the schema Api. */
+export type CollectionName<Api> = keyof CollectionsOf<Api> & string
+/** The Row type of collection `K` on the schema Api. */
+export type RowOf<Api, K extends PropertyKey> = K extends keyof CollectionsOf<Api>
+  ? CollectionsOf<Api>[K] extends { __row?: infer R }
+    ? R
+    : never
+  : never
 
 interface PendingMutationLike {
   type: RowOp
@@ -79,9 +75,41 @@ function compilePredicate(where: unknown): (row: Record<string, unknown>) => boo
   return (row) => toBooleanPredicate(evaluate(row))
 }
 
-export function doCollectionOptions<T extends object>(
-  opts: DoCollectionOptions<T>,
-): CollectionConfig<T, string> {
+/** Api-typed options: Row is inferred from the schema `Api` + `table`, so the
+ *  client needs no runtime schema value. `getKey` and the row type follow. */
+export interface DoApiCollectionOptions<Api, K extends CollectionName<Api>> {
+  /** One transport per DO, parameterized by the same schema `Api`. */
+  transport: WebSocketTransport<Api>
+  /** Collection (table) name on the DO — a key of the schema's collections. */
+  table: K
+  /** Stable client-supplied key extractor (must match the server pk). */
+  getKey: (row: RowOf<Api, K>) => string
+  /** Collection id; defaults to the table name. */
+  id?: string
+  syncMode?: "eager" | "on-demand"
+  where?: unknown
+}
+
+// The schema `Api` is the single source of truth: `Api` is inferred from the
+// (branded) transport and the table key from the `table` literal, so the row
+// type follows and a table that isn't a collection of `Api` is a type error.
+//
+//   const messages = createCollection(
+//     doCollectionOptions({ transport, table: "messages", getKey: (m) => m.id }),
+//   )
+//
+// Explicit type args are optional (`doCollectionOptions<Api, "messages">(...)`).
+export function doCollectionOptions<Api, K extends CollectionName<Api>>(
+  opts: DoApiCollectionOptions<Api, K>,
+): CollectionConfig<RowOf<Api, K> & object, string>
+export function doCollectionOptions(opts: {
+  transport: WebSocketTransport<any>
+  table: string
+  getKey: (row: any) => string
+  id?: string
+  syncMode?: "eager" | "on-demand"
+  where?: unknown
+}): CollectionConfig<any, string> {
   const { transport, table, getKey, where } = opts
   const syncMode = opts.syncMode ?? "eager"
   const eagerSubId = `${table}#${++subSeq}`
@@ -184,7 +212,7 @@ export function doCollectionOptions<T extends object>(
         })
         ensureBegin()
         for (const r of page) {
-          if (collection.get(getKey(r as T)) === undefined) write({ type: "insert", value: r })
+          if (collection.get(getKey(r)) === undefined) write({ type: "insert", value: r })
         }
         flush()
       }
@@ -274,7 +302,7 @@ export function doCollectionOptions<T extends object>(
     onInsert: mutationFn,
     onUpdate: mutationFn,
     onDelete: mutationFn,
-  } as unknown as CollectionConfig<T, string>
+  } as unknown as CollectionConfig<any, string>
 }
 
 /** What our sync() returns: a cleanup fn (eager) or the on-demand handlers. */

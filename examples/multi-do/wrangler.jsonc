@@ -1,0 +1,14 @@
+{
+  "name": "tanstack-do-db-multi-do",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-03-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "ROOM_DO", "class_name": "RoomDO" },
+      { "name": "INBOX_DO", "class_name": "InboxDO" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RoomDO", "InboxDO"] }],
+  "assets": { "directory": "./public", "binding": "ASSETS" }
+}
