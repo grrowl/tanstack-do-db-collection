@@ -201,6 +201,49 @@ describe("Syncable over a partyserver-like host (ADR-0015)", () => {
     })
   })
 
+  it("bare DO treats a legacy untagged socket as sync (0.4.0 → mixin migration)", async () => {
+    // A socket accepted by 0.4.0 carried NO tag. After the mixin upgrade, such a
+    // socket can wake out of hibernation; the bare DO must still treat it as sync
+    // (it owns every socket), or a pre-existing client's frames are silently
+    // ignored. Simulate it by accepting an untagged socket directly.
+    const room = "legacy-untagged"
+    await openWs(`/sync/${room}`) // construct the DO + its schema
+    const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
+    await runInDurableObject(stub, async (instance, state) => {
+      const pair = new WebSocketPair()
+      const server = pair[1]
+      state.acceptWebSocket(server) // NO tag — exactly what 0.4.0 did
+      const client = pair[0]
+      client.accept()
+      const got = new Promise<ServerFrame>((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("untagged socket frame ignored")), 2000)
+        client.addEventListener(
+          "message",
+          (e) => { clearTimeout(t); resolve(codec.decode(e.data as ArrayBuffer) as ServerFrame) },
+          { once: true },
+        )
+      })
+      // The mixin must PROCESS the frame (a snap-end back), not delegate/ignore it.
+      const handler = instance as unknown as { webSocketMessage(ws: WebSocket, m: ArrayBuffer): Promise<void> }
+      await handler.webSocketMessage(server, codec.encode(sub("s1", "messages")) as unknown as ArrayBuffer)
+      expect((await got).t).toBe("snap-end")
+    })
+  })
+
+  it("configure({ caseSensitiveLike: false }) is a real toggle, not a dead option", async () => {
+    const room = "toggle-pragma"
+    await openWs(`/sync/${room}`)
+    const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName(room))
+    await runInDurableObject(stub, (instance, state) => {
+      const like = (): unknown => Array.from(state.storage.sql.exec("SELECT ('A' LIKE 'a') AS m"))[0]!.m
+      expect(like()).toBe(0) // bare-DO default ON → case-sensitive
+      ;(instance as unknown as { sync: { configure(o: { caseSensitiveLike: boolean }): void } }).sync.configure({
+        caseSensitiveLike: false,
+      })
+      expect(like()).toBe(1) // toggled OFF → case-insensitive
+    })
+  })
+
   it("SyncDurableObject (bare DO base) keeps 0.4.0 defaults: auto-response ON, case-sensitive LIKE ON", async () => {
     const room = "bare-defaults"
     const ws = await openWs(`/sync/${room}`)

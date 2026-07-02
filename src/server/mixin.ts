@@ -121,6 +121,9 @@ export function Syncable<Env = unknown, TUser = unknown>() {
       /** True when `Base` defines a `fetch` we can delegate non-sync traffic to.
        *  On a bare `DurableObject` this is false and the mixin owns all upgrades. */
       readonly #hasSuperFetch: boolean
+      /** True when `Base === DurableObject`. A bare DO shares its sockets with no
+       *  host, so tddc owns every socket (incl. legacy untagged 0.4.0 sockets). */
+      readonly #isBareDO: boolean
 
       // ---- tuning knobs (protected, overridable — ADR-0015) ------------------
       /** Egress coalescer tick (ms) — the single user-perceived-latency knob. */
@@ -154,15 +157,19 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         super(...args)
         // Base-dependent defaults: reproduce 0.4.0 exactly on a bare DO, default
         // the two DO-global side effects OFF over any other host (ADR-0015).
-        const isBareDO = (Base as unknown) === (DurableObject as unknown)
+        this.#isBareDO = (Base as unknown) === (DurableObject as unknown)
         this.#hasSuperFetch = typeof (Base.prototype as { fetch?: unknown }).fetch === "function"
-        this.#autoResponse = isBareDO
-        this.#caseSensitiveLike = isBareDO
-        if (this.#autoResponse) this.#applyAutoResponse()
-        if (this.#caseSensitiveLike) this.#applyCaseSensitiveLike()
-        // Restore ONLY sync sockets after a hibernation wake (tag-filtered — the
-        // broadcaster must never fan sync frames onto a host socket).
-        for (const ws of this.ctx.getWebSockets(SYNC_TAG)) this.#liveWs.add(ws)
+        this.#autoResponse = this.#isBareDO
+        this.#caseSensitiveLike = this.#isBareDO
+        if (this.#autoResponse) this.#applyAutoResponse(true)
+        if (this.#caseSensitiveLike) this.#applyCaseSensitiveLike(true)
+        // Restore live sockets after a hibernation wake. On a bare DO tddc owns
+        // EVERY socket (there is no host to share with), so restore all of them —
+        // including legacy untagged sockets accepted by a pre-mixin 0.4.0 build
+        // that survive the wake across an upgrade. Over any other base, restore
+        // ONLY our tagged sockets so the broadcaster never touches a host socket.
+        const restore = this.#isBareDO ? this.ctx.getWebSockets() : this.ctx.getWebSockets(SYNC_TAG)
+        for (const ws of restore) this.#liveWs.add(ws)
         this.#broadcaster = new Broadcaster((ws, frame) => this.#send(ws, frame), this.tickMs)
         this.#broadcaster.start(() => this.#liveWs)
         const self = this
@@ -182,17 +189,20 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         return this.#api
       }
 
-      #applyAutoResponse(): void {
+      #applyAutoResponse(on: boolean): void {
         // Auto-pong via the runtime: survives hibernation, no per-message billing.
-        this.ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"))
+        // `off` clears the pair so `configure({ autoResponse: false })` is a real
+        // toggle (undoing the bare-DO default), not a dead option.
+        this.ctx.setWebSocketAutoResponse(on ? new WebSocketRequestResponsePair("ping", "pong") : undefined)
       }
 
-      #applyCaseSensitiveLike(): void {
+      #applyCaseSensitiveLike(on: boolean): void {
         // Make SQLite LIKE case-sensitive so the SQL snapshot path matches
         // @tanstack/db's case-sensitive `like` evaluator on the delta path — the
         // single source of truth for filtered-subscription membership (ADR-0013).
-        // Connection-scoped; re-applied on every instantiation (incl. a wake).
-        this.ctx.storage.sql.exec("PRAGMA case_sensitive_like = ON")
+        // Connection-scoped; re-applied on every instantiation (incl. a wake). The
+        // `off` branch makes `configure({ caseSensitiveLike: false })` a real toggle.
+        this.ctx.storage.sql.exec(`PRAGMA case_sensitive_like = ${on ? "ON" : "OFF"}`)
       }
 
       #configure(opts: SyncableOptions<TUser>): void {
@@ -200,11 +210,11 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         if (opts.parseAttachment !== undefined) this.#parseAttachmentHook = opts.parseAttachment
         if (opts.autoResponse !== undefined) {
           this.#autoResponse = opts.autoResponse
-          if (opts.autoResponse) this.#applyAutoResponse()
+          this.#applyAutoResponse(opts.autoResponse)
         }
         if (opts.caseSensitiveLike !== undefined) {
           this.#caseSensitiveLike = opts.caseSensitiveLike
-          if (opts.caseSensitiveLike) this.#applyCaseSensitiveLike()
+          this.#applyCaseSensitiveLike(opts.caseSensitiveLike)
         }
       }
 
@@ -271,6 +281,18 @@ export function Syncable<Env = unknown, TUser = unknown>() {
           return new Response("unauthorized", { status: 401 })
         }
 
+        // The socket attachment must not carry partyserver's reserved `__pk` key,
+        // or a partyserver-like host would mis-claim this sync socket as its own
+        // (the second, host-side discriminator). The SYNC_TAG below always keeps
+        // tddc's own side correct; this guard fails loud so a claim object that
+        // happens to use `__pk` cannot silently break host isolation.
+        if (!this.#isBareDO && attachment != null && typeof attachment === "object" && "__pk" in attachment) {
+          console.error(
+            "sync attachment carries a reserved `__pk` key — a partyserver-like host will mis-claim " +
+              "this socket. Remove `__pk` from your parseAttachment claims (ADR-0015).",
+          )
+        }
+
         const pair = new WebSocketPair()
         const client = pair[0]
         const server = pair[1]
@@ -283,9 +305,12 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         return new Response(null, { status: 101, webSocket: client })
       }
 
-      /** True iff `ws` is a tddc sync socket (carries SYNC_TAG). */
+      /** True iff `ws` is a tddc sync socket. On a bare DO tddc owns every socket
+       *  (no host to share with), so all sockets are sync — which also keeps a
+       *  legacy untagged 0.4.0 socket working after the mixin upgrade. Over any
+       *  other base, only SYNC_TAG sockets are ours; the rest delegate to `super`. */
       #isSyncSocket(ws: WebSocket): boolean {
-        return this.ctx.getTags(ws).includes(SYNC_TAG)
+        return this.#isBareDO || this.ctx.getTags(ws).includes(SYNC_TAG)
       }
 
       override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
