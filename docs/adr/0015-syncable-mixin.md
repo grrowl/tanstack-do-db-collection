@@ -212,3 +212,14 @@ tddc design gap; a PR against Actors is possible in principle but out of scope.
   of CI, to keep the ~13 MB dep out of the package) that opens both socket types
   on one DO, forces a hibernation wake, and asserts no cross-talk. The in-CI
   host-matrix suite pins the same contract against a fake host.
+- **The wake-time restore itself (discriminator 1's `getWebSockets(SYNC_TAG)`
+  call, `mixin.ts`'s constructor) is not exercised by an actual hibernation
+  eviction in the in-CI suite** — `@cloudflare/vitest-pool-workers@0.12.21`
+  (this repo's pinned version) predates the `evictDurableObject`/
+  `evictAllDurableObjects` helpers that ship a real evict-and-reconstruct
+  cycle (added in `0.16.20`, which requires `vitest@^4`, a major bump this
+  repo doesn't carry yet). Today the restore is verified by code-reading plus
+  the same-instance socket-tag assertions in `tests/host-matrix.test.ts`
+  (e.g. "sync and host sockets coexist"), not by a test that actually tears
+  the instance down and reconstructs it. Upgrading `vitest`/`vitest-pool-workers`
+  to unlock a real wake test is tracked as follow-up work, not bundled here.
