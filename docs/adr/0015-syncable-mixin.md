@@ -174,6 +174,27 @@ tddc design gap; a PR against Actors is possible in principle but out of scope.
 
 ## Consequences
 
+- **`Syncable()` must be applied exactly once, over the outermost DO base —
+  never stacked over another `Syncable()` application.** Verified:
+  `class Outer extends Syncable()(Syncable()(DurableObject)) {}` is a real
+  `tsc` error (the inner application's `ctx`/`Env` typing doesn't satisfy
+  `DOCtor`'s construct-signature constraint without a cast). Forcing it past
+  the type checker with a cast still doesn't work at runtime: `fetch`,
+  `webSocketMessage/Close/Error`, and the `sync` getter are per-class
+  overrides, so the outer layer's definitions always shadow the inner
+  layer's — the inner layer's `registerSync` is never reachable and it never
+  dispatches. Cohost by putting a **host framework** under `Syncable()`
+  (`Syncable()(Agent)`), never another `Syncable()` application.
+- **Cold-snapshot row order is now deterministic.** The `#handleSub` snapshot
+  path (no `since` cursor) and the paginated `#handleFetch` path both lower
+  through `compileSubsetQuery` (`sql-compiler.ts`), which defaults to
+  `ORDER BY rowid` when the client sends no `orderBy` — previously a bare
+  `SELECT * FROM tbl` left row order as an accident of SQLite's query plan
+  (field-verified: a `WHERE` touching the pk can make the planner prefer the
+  pk's autoindex over a rowid scan, returning pk-sorted rows instead of
+  insertion order). `rowid` matches insertion order among currently-live rows
+  and needs no schema change, since `assertSyncCompatible` (ADR-0007, D9)
+  already forbids the `INTEGER PRIMARY KEY` pk that would alias it.
 - One DO class can be both a framework host and a sync source
   (`class FeedAgent extends Syncable<Env, Claims>()(Agent<Env, State>)`), with no
   framework added to tddc's dependency graph — the app supplies `Base`.
