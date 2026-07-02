@@ -14,6 +14,19 @@ import { type FakeHost, testSchema } from "./test-worker.ts"
 // foreign traffic, no `sql` shadow, and trigger safety on a host with its own
 // tables. The fake stands in for the real `agents` package so CI never carries a
 // ~13 MB pre-1.0 dependency; a real-`agents` smoke gates version bumps.
+//
+// GAP (honest, not faked): none of these tests force a real hibernation
+// eviction. They assert the tag partition (`getWebSockets(SYNC_TAG)` vs.
+// `getWebSockets(HOST_TAG)`) on the SAME live instance — which pins the
+// cohosting contract this file exists for, but not the wake-time restore
+// itself (`mixin.ts`'s constructor, ADR-0015 discriminator 1) that reruns
+// `getWebSockets(SYNC_TAG)` after a fresh eviction-and-reconstruct cycle. As
+// of this repo's pinned `@cloudflare/vitest-pool-workers@0.12.21`, there is
+// no in-process way to force that cycle: the `evictDurableObject`/
+// `evictAllDurableObjects` helpers that do it were added in `0.16.20`, which
+// requires `vitest@^4` — a major bump out of scope here. The restore is
+// verified by code-reading only; see ADR-0015's Consequences for detail and
+// the upgrade this is blocked on.
 
 const codec = createFrameCodec()
 const HOST_TAG = "__host"
