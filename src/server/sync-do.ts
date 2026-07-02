@@ -22,13 +22,25 @@ import type { CompiledSync, SyncSchema } from "./registry.ts"
 // Generics are erased at runtime, so the base VALUE is the plain application of
 // the factory over DurableObject; Env/TUser are re-exposed through this class's
 // own typed shims below (a base-class expression cannot reference a class's own
-// type parameters — TS2562). The constructor is re-cast to `(...args: any[])`
-// (preserving the instance type, incl. the protected tuning knobs) so this
-// generic subclass can forward `super(ctx, env)` for any `Env`.
-const _SyncableBase = Syncable()(DurableObject)
-const SyncableBase = _SyncableBase as abstract new (...args: Array<unknown>) => InstanceType<typeof _SyncableBase>
+// type parameters — TS2562). The factory already exposes a `(...args: any[])`
+// construct signature, so this generic subclass can forward `super(ctx, env)`
+// for any `Env`.
+const SyncableBase = Syncable()(DurableObject)
 
 export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends SyncableBase {
+  // The mixin's return type hides the tuning knobs (they must not widen the
+  // host-collision surface). They ARE protected fields on the mixin at runtime;
+  // re-declare them here (ambient — no runtime field, no shadow) so existing
+  // `protected override readonly tickMs = …` subclasses keep compiling. Behind a
+  // non-DO host, tune with `this.sync.configure` instead.
+  declare protected readonly tickMs: number
+  declare protected readonly compactionEvery: number
+  declare protected readonly changelogRetentionMs: number | null
+  declare protected readonly dedupRetentionMs: number
+  declare protected readonly maxOpsPerMutation: number
+  declare protected readonly maxSubsPerSocket: number
+  declare protected readonly maxFrameBytes: number
+
   constructor(ctx: ConstructorParameters<typeof DurableObject>[0], env: Env) {
     super(ctx, env)
     // Bridge the overridable protected `parseAttachment` into the facade so an

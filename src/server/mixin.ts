@@ -850,7 +850,16 @@ export function Syncable<Env = unknown, TUser = unknown>() {
       }
     }
 
-    return SyncableMixin
+    // Explicit, NAMEABLE return type — required for declaration emit (a raw
+    // `class extends Base` would emit an anonymous class type whose inherited
+    // protected `ctx`/`env` trip TS4094). A single `(...args: any[])` construct
+    // signature (so a mixed base's own constructor params don't leak into a
+    // generic subclass's `super(...)`) yielding the host instance intersected
+    // with the sync surface. The protected tuning knobs stay protected fields at
+    // runtime; `SyncDurableObject` re-declares them for override typing.
+    return SyncableMixin as unknown as abstract new (
+      ...args: Array<unknown>
+    ) => InstanceType<TBase> & SyncMixin<Env, TUser>
   }
 }
 

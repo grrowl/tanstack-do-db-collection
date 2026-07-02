@@ -2,6 +2,7 @@
 // miniflare.durableObjects, and routes WebSocket upgrades to the sync DO.
 
 import { DurableObject } from "cloudflare:workers"
+import { Syncable } from "../src/server/mixin.ts"
 import { defineSync, type StandardSchemaV1 } from "../src/server/registry.ts"
 import { SyncDurableObject } from "../src/server/sync-do.ts"
 
@@ -71,8 +72,9 @@ function upcasingBody<T extends { body?: unknown }>(): StandardSchemaV1<T> {
 const sync = defineSync<Claims>()
 
 // The same collections/mutations/commands as before, authored via the
-// object-schema API. The schema VALUE is registered on the DO below.
-const testSchema = sync.schema({
+// object-schema API. The schema VALUE is registered on the DO below. Exported so
+// the host-matrix test can re-register to drive the trigger reaper (ADR-0008).
+export const testSchema = sync.schema({
   collections: {
     messages: sync.collection<MsgRow>({
       pk: "id",
@@ -244,12 +246,122 @@ export class LimitsTestDO extends SyncTestDO {
   protected override readonly maxSubsPerSocket = 2
 }
 
+// ---- Host-matrix fixtures (host-matrix.test.ts) ---------------------------
+//
+// A fake partyserver-like host base and the Syncable mixin applied over it. The
+// fake mimics partyserver's OBSERVABLE contract without pulling the ~13 MB agents
+// dependency (ADR-0015 test plan): it owns sockets stamped with a `__pk`
+// attachment, filters foreign sockets in every hibernation handler, exposes a
+// `sql` tagged-template method (the member the mixin must NOT shadow), and
+// upgrades on its own `/_host` path — everything else falls through.
+
+const HOST_TAG = "__host"
+
+export class FakeHost extends DurableObject {
+  /** Host-delivered frames, for cross-delivery assertions. */
+  hostInbox: Array<string> = []
+  /** Count of host-owned socket closes seen by the host handler. */
+  hostClosed = 0
+
+  /** partyserver-style tagged-template query (partyserver dist/index.js:557).
+   *  The mixin must never define a `sql` property that shadows this. */
+  sql<T = Record<string, unknown>>(strings: TemplateStringsArray, ...values: Array<unknown>): Array<T> {
+    let query = ""
+    strings.forEach((s, i) => {
+      query += s + (i < values.length ? "?" : "")
+    })
+    return Array.from(this.ctx.storage.sql.exec(query, ...values)) as Array<T>
+  }
+
+  /** partyserver's `__pk` discriminator (dist/index.js:14 to 35): a socket is the
+   *  host's iff its attachment carries a `__pk` key. */
+  #isHostSocket(ws: WebSocket): boolean {
+    const a = ws.deserializeAttachment() as { __pk?: unknown } | null
+    return a != null && typeof a === "object" && "__pk" in a
+  }
+
+  override async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url)
+    if (req.headers.get("Upgrade") === "websocket" && url.pathname.endsWith("/_host")) {
+      const pair = new WebSocketPair()
+      pair[1].serializeAttachment({ __pk: crypto.randomUUID() })
+      this.ctx.acceptWebSocket(pair[1], [HOST_TAG])
+      return new Response(null, { status: 101, webSocket: pair[0] })
+    }
+    return new Response("host: not found", { status: 404 })
+  }
+
+  override webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+    if (!this.#isHostSocket(ws)) return // partyserver short-circuits foreign sockets
+    this.hostInbox.push(typeof message === "string" ? message : "<binary>")
+  }
+
+  override webSocketClose(ws: WebSocket): void {
+    if (!this.#isHostSocket(ws)) return
+    this.hostClosed++
+  }
+
+  override webSocketError(_ws: WebSocket): void {}
+
+  /** partyserver-style broadcast: touches only the host's own sockets. */
+  hostBroadcast(msg: string): void {
+    for (const ws of this.ctx.getWebSockets(HOST_TAG)) ws.send(msg)
+  }
+}
+
+/** The mixin over the fake host. Defaults: auto-response OFF, pragma OFF (base is
+ *  not DurableObject). Registers the same collections as SyncTestDO, plus a
+ *  host-owned `cf_agents_state` table that is deliberately NOT registered. */
+export class SyncOverHostDO extends Syncable<unknown, Claims>()(FakeHost) {
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env)
+    // Author-owned auth hook via the facade (the mixed base has no legacy
+    // `parseAttachment` override).
+    this.sync.configure({ parseAttachment: (req) => ({ userId: req.headers.get("x-user") ?? "anon" }) })
+    ctx.blockConcurrencyWhile(async () => {
+      // NOTE: reach `ctx.storage.sql` directly — `this.sql` here is the HOST's
+      // tagged-template method (ADR-0015), the whole point of dropping the getter.
+      const sql = ctx.storage.sql
+      sql.exec(`CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, body TEXT)`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT)`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS validated (id TEXT PRIMARY KEY, body TEXT)`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS transformed (id TEXT PRIMARY KEY, body TEXT)`)
+      // A host-owned table the author never registers (cf. cf_agents_state).
+      sql.exec(`CREATE TABLE IF NOT EXISTS cf_agents_state (key TEXT PRIMARY KEY, value TEXT)`)
+      this.sync.registerSync(testSchema)
+    })
+  }
+}
+
+/** Same base, but opts the two DO-global side effects ON — proves `configure`
+ *  restores 0.4.0-style auto-response + case-sensitive LIKE over a non-DO base. */
+export class SyncOverHostOptInDO extends Syncable<unknown, Claims>()(FakeHost) {
+  constructor(ctx: DurableObjectState, env: unknown) {
+    super(ctx, env)
+    this.sync.configure({
+      autoResponse: true,
+      caseSensitiveLike: true,
+      parseAttachment: (req) => ({ userId: req.headers.get("x-user") ?? "anon" }),
+    })
+    ctx.blockConcurrencyWhile(async () => {
+      const sql = ctx.storage.sql
+      sql.exec(`CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, body TEXT)`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS files (id TEXT PRIMARY KEY, name TEXT)`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS validated (id TEXT PRIMARY KEY, body TEXT)`)
+      sql.exec(`CREATE TABLE IF NOT EXISTS transformed (id TEXT PRIMARY KEY, body TEXT)`)
+      this.sync.registerSync(testSchema)
+    })
+  }
+}
+
 interface Env {
   TEST_DO: DurableObjectNamespace
   SYNC_DO: DurableObjectNamespace
   MAINT_DO: DurableObjectNamespace
   SLOW_DO: DurableObjectNamespace
   LIMITS_DO: DurableObjectNamespace
+  HOST_DO: DurableObjectNamespace
+  HOST_OPTIN_DO: DurableObjectNamespace
 }
 
 export default {
@@ -270,6 +382,16 @@ export default {
     if (url.pathname.startsWith("/limits/")) {
       const name = url.pathname.slice("/limits/".length) || "default"
       return env.LIMITS_DO.get(env.LIMITS_DO.idFromName(name)).fetch(req)
+    }
+    // Host-matrix routes: /host/<name>/... and /host-optin/<name>/... forward the
+    // WHOLE request so the DO sees the trailing /_sync or /_host discriminator.
+    if (url.pathname.startsWith("/host/")) {
+      const name = url.pathname.slice("/host/".length).split("/")[0] || "default"
+      return env.HOST_DO.get(env.HOST_DO.idFromName(name)).fetch(req)
+    }
+    if (url.pathname.startsWith("/host-optin/")) {
+      const name = url.pathname.slice("/host-optin/".length).split("/")[0] || "default"
+      return env.HOST_OPTIN_DO.get(env.HOST_OPTIN_DO.idFromName(name)).fetch(req)
     }
     return new Response("test-worker")
   },
