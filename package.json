@@ -33,6 +33,10 @@
     "./client": {
       "types": "./dist/client/index.d.ts",
       "import": "./dist/client/index.js"
+    },
+    "./server/mixin": {
+      "types": "./dist/server/mixin.d.ts",
+      "import": "./dist/server/mixin.js"
     }
   },
   "files": [

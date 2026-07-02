@@ -4,6 +4,10 @@
 model with a third write origin. The "caller ensures init" caveat below is
 retired by [ADR-0007](./0007-author-owned-schema-register-sync.md) (schema +
 triggers now exist at construction via `registerSync`).
+[ADR-0015](./0015-syncable-mixin.md) leaves `runSyncedWrite` unchanged and makes
+it also the write path for a host tool body on a mixed base
+(`this.sync.runSyncedWrite`), so a committed insert drains the CDC log and
+broadcasts in the same step regardless of the DO's framework base.
 
 ## Context
 

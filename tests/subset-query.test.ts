@@ -65,6 +65,27 @@ describe("subset shaping pushed into SQLite (M6)", () => {
     ws.close()
   })
 
+  it("cold snapshot preserves insertion order when the client sends no orderBy (field-verified regression)", async () => {
+    const room = "ss-cold-order"
+    const ws = await openWs(room)
+    // Insertion order deliberately NOT pk-lexicographic: a query plan that uses
+    // the pk's autoindex (SQLite may pick it once a WHERE clause touches `id`)
+    // would return sorted-by-id order ("a","m","z") instead of insertion order
+    // — exactly the divergence the field-verified bug exposed. All three
+    // inserts land in one synchronous block (same millisecond), so a `ts`-based
+    // tiebreak could never disambiguate them even if one were used.
+    await seed(room, [
+      ["z", "1"],
+      ["a", "2"],
+      ["m", "3"],
+    ])
+    const where = { type: "func", name: "gt", args: [{ type: "ref", path: ["id"] }, { type: "val", value: "" }] }
+    send(ws, { t: "sub", subId: "s1", collection: "messages", where } as never)
+    const frames = await collectUntil(ws, (f) => f.t === "snap-end")
+    expect(snapKeys(frames)).toEqual(["z", "a", "m"])
+    ws.close()
+  })
+
   it("rejects a subscription whose predicate cannot be lowered (reset)", async () => {
     const ws = await openWs("ss-reject")
     // ilike is outside the supported floor.

@@ -8,7 +8,7 @@ explains the displacement.
 | # | Title | Status |
 |---|---|---|
 | [0000](./0000-record-architecture-decisions.md) | Record architecture decisions | Accepted |
-| [0001](./0001-sync-architecture.md) | Sync architecture: single-ordered-stream over a Durable Object | Accepted (amended by 0002; D11 builder superseded by 0014) |
+| [0001](./0001-sync-architecture.md) | Sync architecture: single-ordered-stream over a Durable Object | Accepted (amended by 0002; D11 builder superseded by 0014; D13 base class reframed as a mixin by 0015) |
 | [0002](./0002-adversarial-review-corrections.md) | Corrections from adversarial review: ordering, shaping, retention | Accepted (C5 retention refined by 0009) |
 | [0003](./0003-atomic-cursor-fetch.md) | Cursor load-more is one atomic fetch, not two | Accepted (naming amended by 0005) |
 | [0004](./0004-after-commit-hook.md) | Side effects go in a fire-and-forget `afterCommit`, not the transaction | Accepted |
@@ -21,3 +21,4 @@ explains the displacement.
 | [0012](./0012-wire-input-hardening.md) | Wire-input hardening: frame-shape guards, inbound limits, sanitized execute errors | Accepted |
 | [0013](./0013-predicate-floor-one-evaluator.md) | Filtered-subscription membership: one evaluator is the source of truth; the floor is the verified-agreeing set | Accepted |
 | [0014](./0014-object-sync-schema.md) | `defineSync`: one schema value, mutations on the collection, commands on the connection | Accepted (supersedes 0001 D11 builder; closes 0010 manifest) |
+| [0015](./0015-syncable-mixin.md) | `Syncable` mixin: the sync core as a mixin over any DO base | Accepted (reframes 0001 D13; Actor unsupported) |

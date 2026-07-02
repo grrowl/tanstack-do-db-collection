@@ -25,6 +25,8 @@ export default defineWorkersProject({
             MAINT_DO: { className: "MaintTestDO", useSQLite: true },
             SLOW_DO: { className: "SlowTickDO", useSQLite: true },
             LIMITS_DO: { className: "LimitsTestDO", useSQLite: true },
+            HOST_DO: { className: "SyncOverHostDO", useSQLite: true },
+            HOST_OPTIN_DO: { className: "SyncOverHostOptInDO", useSQLite: true },
           },
         },
       },

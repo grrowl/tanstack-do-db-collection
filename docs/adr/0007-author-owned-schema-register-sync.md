@@ -4,6 +4,11 @@
 moves the [ADR-0001](./0001-sync-architecture.md) D9 enforcement point, and
 retires [ADR-0006](./0006-server-originated-writes.md)'s init caveat. Hard
 breaking change to the DO authoring API (pre-1.0).
+[ADR-0015](./0015-syncable-mixin.md) leans on this decision: because
+`registerSync` is author-driven (called in the constructor's
+`blockConcurrencyWhile` after the tables exist), the mixin needs no
+base-constructor magic and composes cleanly with a host base's own constructor —
+the author creates tables, then calls `this.sync.registerSync`, in that order.
 
 ## Context
 
