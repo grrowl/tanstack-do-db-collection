@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 While pre-1.0, the public API may change between 0.x releases.
 
+## [Unreleased]
+
+### Fixed
+
+- **`registerSync` now rejects tables with no usable internal `rowid` (ADR-0015).**
+  The cold-snapshot/fetch reader defaults to `ORDER BY rowid` when the client
+  sends no `orderBy`. A `WITHOUT ROWID` table has no rowid, so that read threw
+  `no such column: rowid` and hung the subscriber; a table with a declared
+  `rowid` column shadows the internal one, so the read would silently sort by
+  that arbitrary column. `assertSyncCompatible` now rejects both loudly at
+  `registerSync`, alongside the existing `INTEGER PRIMARY KEY` guard. Ordinary
+  rowid tables (the documented `id TEXT PRIMARY KEY` pattern) are unaffected.
+
 ## [0.5.0] — 2026-07-02
 
 ### Added

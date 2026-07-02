@@ -76,4 +76,28 @@ describe("assertSyncCompatible (ADR-0007, D9) — real-table introspection", () 
       expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/sole PRIMARY KEY/)
     })
   })
+
+  it("rejects a WITHOUT ROWID table (no rowid for the default snapshot order)", async () => {
+    // The pk is a valid sole TEXT key, so it clears every D9 check — but a
+    // WITHOUT ROWID table has no rowid, and the cold-snapshot/fetch reader
+    // defaults to `ORDER BY rowid` (ADR-0015). Without this guard the table
+    // registers, then the first orderBy-less sub throws `no such column: rowid`
+    // at read time and hangs the subscriber. Reject loudly at registerSync.
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id TEXT PRIMARY KEY, body TEXT) WITHOUT ROWID")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/WITHOUT ROWID/)
+    })
+  })
+
+  it("rejects a declared `rowid` column that shadows SQLite's internal rowid", async () => {
+    // A user column named `rowid` clears every D9 check AND makes `SELECT rowid`
+    // resolve — but it shadows the internal insertion-order rowid, so the
+    // reader's default `ORDER BY rowid` (ADR-0015) would sort by this arbitrary
+    // column and lose determinism on null/duplicate values. Probing alone can't
+    // see the shadow; reject the declared column explicitly.
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id TEXT PRIMARY KEY, rowid TEXT)")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/shadows/)
+    })
+  })
 })

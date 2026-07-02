@@ -191,8 +191,10 @@ export function compileSubsetQuery(tbl: string, opts: SubsetQuery): { sql: strin
     // `rowid` also matches insertion order among currently-live rows: a rowid
     // table assigns each new row 1 + the current max, which is monotonic
     // across inserts regardless of intervening deletes. Every synced table
-    // qualifies — `assertSyncCompatible` (ADR-0007, D9) forbids an `INTEGER
-    // PRIMARY KEY` pk, so the real rowid is always intact underneath.
+    // exposes a real internal rowid: `assertSyncCompatible` (changes.ts) forbids
+    // an `INTEGER PRIMARY KEY` pk (which aliases it), a `WITHOUT ROWID` table
+    // (which has none), and a declared `rowid` column (which shadows it), so this
+    // reference always resolves to insertion order.
     sql += ` ORDER BY rowid`
   }
 
