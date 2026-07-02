@@ -92,8 +92,8 @@ export interface SyncMixin<Env, TUser> {
   readonly sync: SyncApi<Env, TUser>
   fetch(request: Request): Promise<Response>
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void>
-  webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void>
-  webSocketError(ws: WebSocket, error: unknown): Promise<void>
+  webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void | Promise<void>
+  webSocketError(ws: WebSocket, error: unknown): void | Promise<void>
 }
 
 /** The structural constructor shape the mixin needs from a host — nothing more

@@ -18,6 +18,13 @@ While pre-1.0, the public API may change between 0.x releases.
   that arbitrary column. `assertSyncCompatible` now rejects both loudly at
   `registerSync`, alongside the existing `INTEGER PRIMARY KEY` guard. Ordinary
   rowid tables (the documented `id TEXT PRIMARY KEY` pattern) are unaffected.
+- **`SyncMixin`'s declared `webSocketClose`/`webSocketError` now match their
+  implementation.** Both were typed as returning `Promise<void>` while the
+  mixin's overrides return `void` synchronously (there is nothing to await —
+  both just drop bookkeeping for the closed socket). Retyped to
+  `void | Promise<void>`, mirroring `@cloudflare/workers-types`'s own
+  `DurableObject` interface. `webSocketMessage` is genuinely `async` and is
+  unaffected. Cosmetic: no runtime behavior changed, only the emitted `.d.ts`.
 
 ## [0.5.0] — 2026-07-02
 
