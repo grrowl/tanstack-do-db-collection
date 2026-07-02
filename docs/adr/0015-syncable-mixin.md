@@ -195,9 +195,12 @@ tddc design gap; a PR against Actors is possible in principle but out of scope.
   insertion order). `rowid` matches insertion order among currently-live rows
   and needs no schema change, since `assertSyncCompatible` (ADR-0007, D9)
   already forbids the `INTEGER PRIMARY KEY` pk that would alias it. It also
-  forbids a `WITHOUT ROWID` table, which has no rowid at all — otherwise the
-  read would throw `no such column: rowid` and hang the subscriber. Both are
-  rejected at `registerSync`, not left to surface at read time.
+  forbids the two other ways a table can lack a usable internal rowid: a
+  `WITHOUT ROWID` table (none at all — the read would throw `no such column:
+  rowid` and hang the subscriber) and a declared `rowid` column (which shadows
+  the internal one, so `ORDER BY rowid` would silently sort by that arbitrary
+  column). All three are rejected at `registerSync`, not left to surface at read
+  time.
 - One DO class can be both a framework host and a sync source
   (`class FeedAgent extends Syncable<Env, Claims>()(Agent<Env, State>)`), with no
   framework added to tddc's dependency graph — the app supplies `Base`.

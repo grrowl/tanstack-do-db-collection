@@ -88,4 +88,16 @@ describe("assertSyncCompatible (ADR-0007, D9) — real-table introspection", () 
       expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/WITHOUT ROWID/)
     })
   })
+
+  it("rejects a declared `rowid` column that shadows SQLite's internal rowid", async () => {
+    // A user column named `rowid` clears every D9 check AND makes `SELECT rowid`
+    // resolve — but it shadows the internal insertion-order rowid, so the
+    // reader's default `ORDER BY rowid` (ADR-0015) would sort by this arbitrary
+    // column and lose determinism on null/duplicate values. Probing alone can't
+    // see the shadow; reject the declared column explicitly.
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id TEXT PRIMARY KEY, rowid TEXT)")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/shadows/)
+    })
+  })
 })
