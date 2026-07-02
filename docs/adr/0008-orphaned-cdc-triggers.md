@@ -3,6 +3,10 @@
 **Status:** Accepted — implemented. Records a limitation of
 [ADR-0007](./0007-author-owned-schema-register-sync.md)'s `registerSync` and the
 fix now shipped: Option 1, reaping in `registerSync`.
+[ADR-0015](./0015-syncable-mixin.md) cites this GLOB `_sync_changes_*` namespace
+as its trigger-collision-safety proof: on a host that owns unregistered tables
+(`cf_agents_*`, `assistant_*`), the reaper's literal-`_` GLOB can never drop a
+host trigger, and unregistered tables get no capture triggers at all.
 
 ## Context
 

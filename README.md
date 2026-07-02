@@ -298,6 +298,78 @@ Task-oriented guides in [`recipes/`](./recipes):
 
 ---
 
+## Cohosting: `Syncable` over a framework base
+
+`SyncDurableObject` is the trivial application of a mixin, `Syncable(Base)`, that
+adds the sync machinery to **any** Durable Object subclass. Use it when a DO
+already extends a framework base — the Cloudflare Agents SDK `Agent`,
+`@cloudflare/think`'s `Think` — and you want that same DO to also be a sync
+source, instead of standing up a second DO and mirror-writing to it (ADR-0015).
+
+```ts
+import { Syncable } from "tanstack-do-db-collection" // or ".../server/mixin"
+
+// Curried: pin Env and your claims type, then apply over the runtime base.
+class FeedAgent extends Syncable<Env, Claims>()(Agent<Env, State>) {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env) // host constructor first
+    // Auth hook for the sync upgrade (same contract as parseAttachment):
+    this.sync.configure({ parseAttachment: (req) => readClaims(req) })
+    ctx.blockConcurrencyWhile(async () => {
+      migrate(ctx.storage.sql) // you create the tables…
+      this.sync.registerSync(feedSchema) // …then register (ADR-0007)
+    })
+  }
+}
+```
+
+The sync API lives behind one facade, `this.sync` (`registerSync`,
+`runSyncedWrite`, `parseAttachment`, `configure`), so the only names the mixin
+adds to your class are `sync` and the four WebSocket/`fetch` handlers. tddc's
+sockets carry a reserved tag and a plain attachment, and it claims only the
+`/_sync` path (configurable) — everything else is delegated to your host base, so
+the two protocols never cross. No framework is added to tddc's dependency graph;
+you supply `Base`.
+
+**Reach `this.ctx.storage.sql`, not `this.sql`, on a mixed base.** The mixin does
+**not** define a `sql` member, because both partyserver and agents define `sql`
+as a tagged-template method and a getter would shadow it. (`SyncDurableObject`
+still has `this.sql` — a bare `DurableObject` has no `sql` to shadow.)
+
+**Your `parseAttachment` claims must not use the key `__pk`.** partyserver marks
+its own sockets with a `__pk` attachment key; a sync claim object carrying `__pk`
+would make a partyserver-like host mis-claim the sync socket. The reserved tag
+keeps tddc's own side correct regardless, and the mixin logs an error if it sees
+`__pk` in a sync attachment — but keep it out of your claims.
+
+> [!IMPORTANT]
+> **Two DO-global side effects default OFF over a non-`DurableObject` base**, and
+> ON for plain `SyncDurableObject` (0.4.0 behavior). Opt in with `configure`:
+> - `autoResponse` — `setWebSocketAutoResponse("ping","pong")` is DO-wide and
+>   would answer a literal `"ping"` frame from *your host's* client before the
+>   host sees it.
+> - `caseSensitiveLike` — `PRAGMA case_sensitive_like = ON` is connection-wide and
+>   changes your host's own `LIKE` queries. (tddc needs it for filtered-sub
+>   parity — ADR-0013.)
+>
+> ```ts
+> this.sync.configure({ autoResponse: true, caseSensitiveLike: true })
+> ```
+
+> [!WARNING]
+> **Never register a host-owned table as a synced collection.** tddc installs CDC
+> triggers only on the tables you register, so a host's own tables
+> (`cf_agents_*`, Think's `assistant_*`) stay untouched by default. But nothing
+> stops you from *registering* one by mistake — do not, or every host write to it
+> emits change rows to your clients.
+
+**`@cloudflare/actors`' `Actor` is not supported.** Its `Sockets` helper adopts
+every hibernated socket on wake (including tddc's), broadcasts to them, and closes
+sockets it does not own — a host defect the mixin cannot work around without
+changing the Actors package. Use `Agent`, `Think`, or a plain `DurableObject`.
+
+---
+
 ## Non-goals
 
 - **Multi-DO transactions.** A transaction touches collections in one DO.

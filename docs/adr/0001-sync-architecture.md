@@ -2,7 +2,11 @@
 
 **Status:** Accepted, **amended by [ADR-0002](./0002-adversarial-review-corrections.md)**
 (ordering barrier, on-demand shaping, retention/liveness, before-image dropped).
-Read 0002 alongside this document.
+Read 0002 alongside this document. **D13's "base class" is reframed as a mixin by
+[ADR-0015](./0015-syncable-mixin.md)**: the sync core is now `Syncable(Base)` and
+`SyncDurableObject` is its trivial application over `DurableObject` — same
+hibernation/`acceptWebSocket`/`serializeAttachment` mechanics, now composable over
+any DO base.
 
 ## Context
 

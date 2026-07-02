@@ -8,15 +8,19 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-### Changed
-
-- **Rejection reasons are surfaced uniformly for mutations and commands (revises
-  ADR-0012 D3).** An `authorize` throw or a schema validation failure now reaches
-  the client with its reason (validation failures carry a `VALIDATION` code);
-  only `execute` errors stay sanitized. Previously a command's `authorize` error
-  was sanitized like its `execute`, unlike a mutation's.
-
 ### Added
+
+- **`Syncable(Base)` mixin — cohost sync on any Durable Object base (ADR-0015).**
+  The sync machinery is now a curried mixin factory,
+  `Syncable<Env, TUser>()(Base)`, so one DO can be both its framework's host (the
+  Agents SDK `Agent`, `@cloudflare/think`'s `Think`, a bare `DurableObject`) and a
+  tddc sync source — no dedicated sync DO, no mirror write. Exposed from the root
+  and a `./server/mixin` subpath. Sync sockets carry a reserved tag and a plain
+  attachment and claim only the `/_sync` path; all other traffic delegates to the
+  host base, so the two protocols never cross (proof: partyserver's `__pk`
+  filtering). `Actor` (`@cloudflare/actors`) is documented as unsupported because
+  its `Sockets` helper adopts foreign sockets on wake. See the README "Cohosting"
+  section.
 
 - **Optional Standard Schema validation (ADR-0014).** A collection's
   `insert.schema` (the row schema, which also infers the collection's Row) and
@@ -26,6 +30,24 @@ While pre-1.0, the public API may change between 0.x releases.
   not a parser: the original value flows to handlers, so schemas must not rely on
   transforms, defaults, or coercion. See
   `recipes/zod-standard-schema-collections.md`.
+
+### Changed
+
+- **`SyncDurableObject` is now `Syncable()(DurableObject)`** — zero API change.
+  All existing `extends SyncDurableObject<Env, Claims>` code, including
+  `this.sql`, `this.registerSync`, `this.runSyncedWrite`, and an overridable
+  `parseAttachment`, keeps compiling and behaving identically to 0.4.0 (the two
+  DO-global side effects — `ping/pong` auto-response and `PRAGMA
+  case_sensitive_like = ON` — stay ON for this base; they default OFF over any
+  other base, opt in with `this.sync.configure`). The internal `sql` getter was
+  removed from the mixin because it shadowed the host's `sql` tagged-template
+  method; reach `this.ctx.storage.sql` directly on a non-`DurableObject` base.
+
+- **Rejection reasons are surfaced uniformly for mutations and commands (revises
+  ADR-0012 D3).** An `authorize` throw or a schema validation failure now reaches
+  the client with its reason (validation failures carry a `VALIDATION` code);
+  only `execute` errors stay sanitized. Previously a command's `authorize` error
+  was sanitized like its `execute`, unlike a mutation's.
 
 ## [0.4.0] — 2026-07-01
 
