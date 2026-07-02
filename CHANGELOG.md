@@ -8,6 +8,8 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-03
+
 ### Fixed
 
 - **`registerSync` now rejects tables with no usable internal `rowid` (ADR-0015).**
