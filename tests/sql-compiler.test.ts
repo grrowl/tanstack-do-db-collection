@@ -81,8 +81,17 @@ describe("IR -> SQL compiler (M6)", () => {
 
   it("emits LIMIT -1 when offset is given without a limit (SQLite requirement)", () => {
     const q = compileSubsetQuery("t", { offset: 5 })
-    expect(q.sql).toBe(`SELECT * FROM "t" LIMIT -1 OFFSET ?`)
+    expect(q.sql).toBe(`SELECT * FROM "t" ORDER BY rowid LIMIT -1 OFFSET ?`)
     expect(q.params).toEqual([5])
+  })
+
+  it("defaults to ORDER BY rowid when the client sends no orderBy (deterministic snapshot order)", () => {
+    // Field-verified regression: a bare SELECT with no ORDER BY leaves row order
+    // as an accident of SQLite's query plan. `rowid` is always available (D9
+    // forbids an INTEGER PRIMARY KEY pk) and matches insertion order among
+    // currently-live rows.
+    const q = compileSubsetQuery("t", {})
+    expect(q.sql).toBe(`SELECT * FROM "t" ORDER BY rowid`)
   })
 
   it("rejects a negative limit/offset and an invalid orderBy column", () => {

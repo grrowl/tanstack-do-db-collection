@@ -181,7 +181,20 @@ export function compileSubsetQuery(tbl: string, opts: SubsetQuery): { sql: strin
   }
 
   const orderBy = compileOrderBy(opts.orderBy)
-  if (orderBy) sql += ` ORDER BY ${orderBy}`
+  if (orderBy) {
+    sql += ` ORDER BY ${orderBy}`
+  } else {
+    // No client-specified order: default to `rowid` so a subset read is
+    // deterministic instead of an accident of SQLite's query plan (a bare scan
+    // happens to walk rowid order, but a WHERE clause touching the pk can make
+    // the planner pick the pk's autoindex instead, returning pk-sorted rows).
+    // `rowid` also matches insertion order among currently-live rows: a rowid
+    // table assigns each new row 1 + the current max, which is monotonic
+    // across inserts regardless of intervening deletes. Every synced table
+    // qualifies — `assertSyncCompatible` (ADR-0007, D9) forbids an `INTEGER
+    // PRIMARY KEY` pk, so the real rowid is always intact underneath.
+    sql += ` ORDER BY rowid`
+  }
 
   if (opts.limit != null) {
     sql += ` LIMIT ?`
