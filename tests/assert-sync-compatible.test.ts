@@ -76,4 +76,16 @@ describe("assertSyncCompatible (ADR-0007, D9) — real-table introspection", () 
       expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/sole PRIMARY KEY/)
     })
   })
+
+  it("rejects a WITHOUT ROWID table (no rowid for the default snapshot order)", async () => {
+    // The pk is a valid sole TEXT key, so it clears every D9 check — but a
+    // WITHOUT ROWID table has no rowid, and the cold-snapshot/fetch reader
+    // defaults to `ORDER BY rowid` (ADR-0015). Without this guard the table
+    // registers, then the first orderBy-less sub throws `no such column: rowid`
+    // at read time and hangs the subscriber. Reject loudly at registerSync.
+    await withSql((sql) => {
+      sql.exec("CREATE TABLE t (id TEXT PRIMARY KEY, body TEXT) WITHOUT ROWID")
+      expect(() => assertSyncCompatible(sql, "t", "id")).toThrow(/WITHOUT ROWID/)
+    })
+  })
 })

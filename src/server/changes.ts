@@ -119,10 +119,12 @@ export function ensureTriggers(
  * Validate that an author-created table is sync-compatible (ADR-0007, D9): the
  * declared `pk` must be the table's SOLE primary key and have TEXT affinity (a
  * client-supplied stable key: TEXT/VARCHAR/CHAR/…). Rejects a missing table, a
- * composite/wrong pk, and an `INTEGER PRIMARY KEY` (the rowid alias —
- * server-assigned, which breaks optimistic id parity). Introspects the real
- * table, so it works however the author created it. `pragma_table_info` is the
- * table-valued form, so the table name binds as a parameter.
+ * composite/wrong pk, an `INTEGER PRIMARY KEY` (the rowid alias — server-assigned,
+ * which breaks optimistic id parity), and a `WITHOUT ROWID` table (the
+ * cold-snapshot/fetch reader orders by `rowid` when the client sends no orderBy —
+ * ADR-0015 — and such a table has none). Introspects the real table, so it works
+ * however the author created it. `pragma_table_info` is the table-valued form, so
+ * the table name binds as a parameter.
  */
 export function assertSyncCompatible(sql: SqlStorage, tbl: string, pk: string): void {
   const cols = Array.from(
@@ -145,6 +147,23 @@ export function assertSyncCompatible(sql: SqlStorage, tbl: string, pk: string): 
       `collection '${tbl}': pk '${pk}' must have TEXT affinity (TEXT, VARCHAR, CHAR, …) so it ` +
         `stores the client-supplied id verbatim; got '${pks[0]!.type || "(no type)"}'. An INTEGER ` +
         `key aliases rowid (server-assigned) and breaks optimistic id parity (D9).`,
+    )
+  }
+  // A synced table must have a real `rowid`: the cold-snapshot/fetch reader
+  // defaults to `ORDER BY rowid` when the client sends no orderBy (ADR-0015). A
+  // `WITHOUT ROWID` table has none, so that read would throw `no such column:
+  // rowid` and hang the subscriber. Probe the exact property the reader relies on
+  // rather than parse the DDL — a compile-time "no such column: rowid" is the
+  // signal; anything else is an unrelated failure and rethrows unchanged.
+  try {
+    sql.exec(`SELECT rowid FROM "${tbl}" LIMIT 0`)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (!/rowid/i.test(msg)) throw e
+    throw new Error(
+      `collection '${tbl}': table is WITHOUT ROWID — sync requires a rowid table so snapshot/fetch ` +
+        `reads have a deterministic default order (ORDER BY rowid, ADR-0015). Recreate '${tbl}' ` +
+        `without the WITHOUT ROWID clause.`,
     )
   }
 }

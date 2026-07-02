@@ -190,9 +190,10 @@ export function compileSubsetQuery(tbl: string, opts: SubsetQuery): { sql: strin
     // the planner pick the pk's autoindex instead, returning pk-sorted rows).
     // `rowid` also matches insertion order among currently-live rows: a rowid
     // table assigns each new row 1 + the current max, which is monotonic
-    // across inserts regardless of intervening deletes. Every synced table
-    // qualifies — `assertSyncCompatible` (ADR-0007, D9) forbids an `INTEGER
-    // PRIMARY KEY` pk, so the real rowid is always intact underneath.
+    // across inserts regardless of intervening deletes. Every synced table has a
+    // real rowid: `assertSyncCompatible` (changes.ts) forbids both an `INTEGER
+    // PRIMARY KEY` pk (which would alias it) and a `WITHOUT ROWID` table (which
+    // would have none), so this reference always resolves.
     sql += ` ORDER BY rowid`
   }
 
