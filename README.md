@@ -1,14 +1,23 @@
-# tanstack-do-db-collection
+# tanstack-durable-object-sync
 
-> Sync a [TanStack DB](https://tanstack.com/db) collection to a
+> Real-time sync for your
 > [Cloudflare Durable Object](https://developers.cloudflare.com/durable-objects/)
-> over WebSockets — optimistic mutations, live queries, and reconnect
-> catch-up, with a **single ordered stream** carrying both data and write
-> confirmation.
+> using [TanStack DB](https://tanstack.com/db). Optimistic writes, live queries,
+> and efficient reconnect catch-up. Your DO is the global source of truth, with
+> zero extra infrastructure dependencies.
 
-The Durable Object owns the data, the browser runs a TanStack DB collection
-against it, and this library moves the diffs — nothing more — over a single
-ordered stream.
+Your data already lives in a Durable Object, which is a strongly-consistent
+little SQLite database running close to your users. This library adds
+instantaneous sync to browsers in real time: subscribe to live queries, mutate
+it optimistically, and real-time changes sync via DO to clients. Simple, secure,
+and with low overhead.
+
+It's built on [TanStack DB](https://tanstack.com/db) — the reactive-store
+sibling of TanStack Query. If you've used `useQuery`, this will feel familiar:
+`useLiveQuery` for reads, `collection.insert()` / `.update()` / `.delete()` for
+writes. TanStack DB gives the client its reactive layer; this library handles
+the sync to your DO. It's as at home streaming an LLM's output token-by-token as
+it is doing ordinary CRUD.
 
 It's a deliberately plain topology, each part doing what it does best. One
 authoritative writer keeps the change log totally ordered and contiguous, so a
@@ -28,13 +37,15 @@ If you reach for sync on Cloudflare today, the good options each ask you to
 give something up. CRDT engines — Cloudflare's own
 [PartyKit](https://github.com/cloudflare/partykit) — are superb for
 collaborative editing, but they're [Yjs](https://github.com/yjs/yjs)-shaped
-(merge semantics, document baggage) with a thin authorization story. We were
-reaching for live-CRUD engines like [Zero](https://zero.rocicorp.dev/) and
-[LiveStore](https://dev.docs.livestore.dev/) — excellent for traditional web
-apps — but the technical requirements get steep for globally-distributed apps:
-a separate store to mirror into and operate alongside every DO. So this library
-takes the third path — the DO is the source of truth, and the entire
-client-side reactive layer (live queries, incremental view maintenance,
+(merge semantics, document baggage) with a thin authorization story.
+[Zero](https://zero.rocicorp.dev/) is excellent for authz-filtered CRUD but
+wants a Postgres to mirror into and doesn't run on a DO.
+[LiveStore](https://dev.docs.livestore.dev/) *does* sync against DO SQLite, but
+it's event-log-based: events are what's stored at rest, so a token-by-token LLM
+stream [grows the log without bound](https://github.com/livestorejs/livestore/issues/136),
+and there's no plain SQL or ORM underneath. So this library takes the third
+path — the DO is the source of truth, its own SQLite is what's stored, and the
+entire client-side reactive layer (live queries, incremental view maintenance,
 optimistic rollback) comes from TanStack DB for free.
 
 | | This library |
@@ -78,10 +89,13 @@ the milestone sequence.
 
 ## Quick start
 
+Three files: the Durable Object that owns the data, the Worker that fronts it
+and stamps trusted claims, and the browser. Here's the whole stack.
+
 ### 1. Define your Durable Object
 
 ```ts
-import { defineSync, SyncDurableObject } from "tanstack-do-db-collection"
+import { defineSync, SyncDurableObject } from "tanstack-durable-object-sync"
 
 interface Claims { userId: string }
 interface Env { /* your bindings */ }
@@ -222,7 +236,7 @@ export default {
 ```ts
 import { createCollection } from "@tanstack/db"
 import { useLiveQuery } from "@tanstack/react-db"
-import { doCollectionOptions, WebSocketTransport } from "tanstack-do-db-collection/client"
+import { doCollectionOptions, WebSocketTransport } from "tanstack-durable-object-sync/client"
 import { ulid } from "ulid"
 import type { Api } from "./session-do" // TYPE-ONLY — nothing server-side is bundled
 
@@ -307,7 +321,7 @@ already extends a framework base — the Cloudflare Agents SDK `Agent`,
 source, instead of standing up a second DO and mirror-writing to it (ADR-0015).
 
 ```ts
-import { Syncable } from "tanstack-do-db-collection" // or ".../server/mixin"
+import { Syncable } from "tanstack-durable-object-sync" // or ".../server/mixin"
 
 // Curried: pin Env and your claims type, then apply over the runtime base.
 class FeedAgent extends Syncable<Env, Claims>()(Agent<Env, State>) {
@@ -344,7 +358,7 @@ keeps tddc's own side correct regardless, and the mixin logs an error if it sees
 
 > [!IMPORTANT]
 > **Two DO-global side effects default OFF over a non-`DurableObject` base**, and
-> ON for plain `SyncDurableObject` (0.4.0 behavior). Opt in with `configure`:
+> ON for plain `SyncDurableObject`. Opt in with `configure`:
 > - `autoResponse` — `setWebSocketAutoResponse("ping","pong")` is DO-wide and
 >   would answer a literal `"ping"` frame from *your host's* client before the
 >   host sees it.

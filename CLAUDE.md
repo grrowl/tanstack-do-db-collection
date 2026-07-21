@@ -1,4 +1,4 @@
-# CLAUDE.md — `tanstack-do-db-collection`
+# CLAUDE.md — `tanstack-durable-object-sync`
 
 Bidirectional sync of a TanStack DB collection ↔ one Cloudflare Durable Object,
 over a single ordered stream. *What/how* lives in `README.md`; *why* lives in

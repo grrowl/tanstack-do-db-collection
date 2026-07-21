@@ -41,7 +41,7 @@ function classify(v: unknown): TypeTag | null {
       return null
     case "function":
     case "symbol":
-      throw new TypeError(`tanstack-do-db-collection: cannot encode a ${typeof v}`)
+      throw new TypeError(`tanstack-durable-object-sync: cannot encode a ${typeof v}`)
     default:
       return null
   }

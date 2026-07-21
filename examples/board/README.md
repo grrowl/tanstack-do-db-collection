@@ -1,4 +1,4 @@
-# board (stress) — tanstack-do-db-collection example
+# board (stress) — tanstack-durable-object-sync example
 
 A high-volume "task board" on **one** Durable Object — the at-scale stress test
 for on-demand windowed pagination. One board holds **5,000 tasks**, but a client

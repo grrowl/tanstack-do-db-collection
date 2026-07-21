@@ -1,4 +1,4 @@
-# multi-do — tanstack-do-db-collection example
+# multi-do — tanstack-durable-object-sync example
 
 The Cloudflare microservices story: **one app, two Durable Objects**, each its
 own sync stream. `RoomDO` owns a chat room's `messages`; `InboxDO` owns a user's
@@ -8,7 +8,7 @@ client-side.
 
 The example imports the library from source (`../../src`), so it always tracks
 the current code. A published consumer would `import` from
-`tanstack-do-db-collection` / `.../client` instead.
+`tanstack-durable-object-sync` / `.../client` instead.
 
 ## Run
 

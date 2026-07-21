@@ -1,5 +1,5 @@
 {
-  "name": "tanstack-do-db-collection",
+  "name": "tanstack-durable-object-sync",
   "version": "0.5.1",
   "description": "Sync a TanStack DB collection to a Cloudflare Durable Object over WebSockets — optimistic mutations, live queries, and single-ordered-stream write confirmation.",
   "type": "module",
@@ -7,11 +7,11 @@
   "author": "Tom McKenzie",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/grrowl/tanstack-do-db-collection.git"
+    "url": "git+https://github.com/grrowl/tanstack-durable-object-sync.git"
   },
-  "homepage": "https://github.com/grrowl/tanstack-do-db-collection#readme",
+  "homepage": "https://github.com/grrowl/tanstack-durable-object-sync#readme",
   "bugs": {
-    "url": "https://github.com/grrowl/tanstack-do-db-collection/issues"
+    "url": "https://github.com/grrowl/tanstack-durable-object-sync/issues"
   },
   "keywords": [
     "tanstack-db",

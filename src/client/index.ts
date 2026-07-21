@@ -1,4 +1,4 @@
-// tanstack-do-db-collection/client — browser entry.
+// tanstack-durable-object-sync/client — browser entry.
 //
 // The TanStack DB collection-options creator and WebSocket transport. Depends
 // on `@tanstack/db` (a peer): types throughout, plus its predicate compiler at

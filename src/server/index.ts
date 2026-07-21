@@ -1,4 +1,4 @@
-// tanstack-do-db-collection — server entry.
+// tanstack-durable-object-sync — server entry.
 //
 // The Durable Object base class and registry that own the data and move the
 // diffs. Imports the workerd runtime (`cloudflare:workers`); not for browsers.

@@ -2,7 +2,7 @@
 //
 // Imports the library straight from source (../../../src) so the example tracks
 // the real code with no build step for the lib. A published consumer would
-// instead `import { ... } from "tanstack-do-db-collection"`.
+// instead `import { ... } from "tanstack-durable-object-sync"`.
 
 import { defineSync, SyncDurableObject } from "../../../src/server/index.ts"
 

@@ -1,4 +1,4 @@
-# chat — tanstack-do-db-collection example
+# chat — tanstack-durable-object-sync example
 
 A minimal multi-client chat: a Cloudflare Worker + `SessionDO` (the sync DO) and
 a React client using `useLiveQuery` over a DO-backed collection. Optimistic
@@ -6,7 +6,7 @@ sends, live cross-tab sync, reconnect — the whole stack end to end.
 
 The example imports the library from source (`../../src`), so it always tracks
 the current code. A published consumer would `import` from
-`tanstack-do-db-collection` / `.../client` instead.
+`tanstack-durable-object-sync` / `.../client` instead.
 
 ## Run
 

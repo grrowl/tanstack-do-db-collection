@@ -14,7 +14,7 @@ when you want the runtime check as well.
 ```ts
 // server
 import { z } from "zod" // 3.24 or later; any Standard Schema library works
-import { defineSync } from "tanstack-do-db-collection/server"
+import { defineSync } from "tanstack-durable-object-sync/server"
 
 const Message = z.object({
   id: z.string(),

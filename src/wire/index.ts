@@ -1,4 +1,4 @@
-// tanstack-do-db-collection — wire protocol (shared between server and client).
+// tanstack-durable-object-sync — wire protocol (shared between server and client).
 //
 // Frame types, the binary/JSON frame codec (M2), and the tagged value codec
 // (M1/D17). Pure TypeScript with no runtime-specific imports, so both the

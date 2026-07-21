@@ -1,4 +1,4 @@
-# on-demand — tanstack-do-db-collection example
+# on-demand — tanstack-durable-object-sync example
 
 Demonstrates `syncMode: 'on-demand'`: the collection loads only the subsets your
 live queries request. Items are categorised; each category is a panel that, when
