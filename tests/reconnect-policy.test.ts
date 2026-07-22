@@ -1,0 +1,259 @@
+import { env, runInDurableObject, SELF } from "cloudflare:test"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import {
+  defaultReconnectDelay,
+  type SubHandler,
+  WebSocketTransport,
+  type WebSocketLike,
+} from "../src/client/transport.ts"
+
+// WHY (ADR-0016, issues #25/#26): the DO's client-readable auth-rejection
+// pattern is accept-then-close with an application code (4xxx) — a failed HTTP
+// handshake status is invisible to a browser WebSocket. A transport that
+// blindly reconnects on ANY close turns that rejection into an infinite retry
+// loop against the DO, and a fixed retry interval turns a DO outage into a
+// thundering herd. So the reconnect delay is a POLICY function: the default
+// treats 4000-4999 as terminal (surfaced via onClosed) and otherwise backs off
+// exponentially with full jitter, resetting the attempt counter on a
+// successful open.
+
+function noopHandler(): SubHandler {
+  return { onSnap: () => {}, onSnapEnd: () => {}, onDelta: () => {}, onUptodate: () => {}, onReset: () => {} }
+}
+
+async function waitFor(pred: () => boolean, timeoutMs = 3000): Promise<void> {
+  const start = Date.now()
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitFor timeout")
+    await new Promise((r) => setTimeout(r, 5))
+  }
+}
+
+async function openSocket(room: string): Promise<WebSocketLike> {
+  const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
+  const ws = res.webSocket
+  if (!ws) throw new Error("no webSocket")
+  ws.accept()
+  return ws as unknown as WebSocketLike
+}
+
+function serverDrop(room: string, code: number, reason: string): Promise<unknown> {
+  return runInDurableObject(env.SYNC_DO.get(env.SYNC_DO.idFromName(room)), (_i, state) => {
+    for (const sock of state.getWebSockets()) sock.close(code, reason)
+  })
+}
+
+describe("defaultReconnectDelay policy", () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it("application close codes 4000-4999 are terminal (null); everything else retries", () => {
+    const policy = defaultReconnectDelay(250)
+    expect(policy(1, 4000)).toBeNull()
+    expect(policy(1, 4403, "org access denied")).toBeNull()
+    expect(policy(5, 4999)).toBeNull()
+    expect(policy(1, 1000)).not.toBeNull() // normal closure: transient (hibernation, redeploy)
+    expect(policy(1, 1006)).not.toBeNull() // abnormal drop: transient
+    expect(policy(1)).not.toBeNull() // connect failure: no close frame at all
+  })
+
+  it("backs off exponentially from the base and caps at 30s", () => {
+    vi.spyOn(Math, "random").mockReturnValue(1) // pin jitter at the ceiling
+    const policy = defaultReconnectDelay(250)
+    expect(policy(1)).toBe(250)
+    expect(policy(2)).toBe(500)
+    expect(policy(3)).toBe(1000)
+    expect(policy(8)).toBe(30_000) // 250·2^7 = 32_000 → capped
+    expect(policy(1000)).toBe(30_000) // huge attempt counts must not overflow past the cap
+  })
+
+  it("full jitter: the delay is uniform in [0, ceiling] — attempts desynchronize", () => {
+    vi.spyOn(Math, "random").mockReturnValue(0)
+    expect(defaultReconnectDelay(250)(3)).toBe(0)
+    vi.spyOn(Math, "random").mockReturnValue(0.5)
+    expect(defaultReconnectDelay(250)(3)).toBe(500)
+  })
+
+  it("a base above the default cap is not truncated below itself", () => {
+    vi.spyOn(Math, "random").mockReturnValue(1)
+    expect(defaultReconnectDelay(60_000)(1)).toBe(60_000)
+  })
+})
+
+describe("transport reconnect policy (ADR-0016)", () => {
+  it("a 4xxx application close is terminal: no reconnect; onClosed surfaces code+reason", async () => {
+    const room = "rcpol-4403-terminal"
+    let opens = 0
+    const closed: Array<[number | undefined, string | undefined]> = []
+    const t = new WebSocketTransport({
+      url: `https://example.com/sync/${room}`,
+      reconnectDelayMs: 5,
+      onClosed: (code, reason) => closed.push([code, reason]),
+      open: async () => {
+        opens++
+        return openSocket(room)
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+    expect(opens).toBe(1)
+
+    await serverDrop(room, 4403, "org access denied")
+    await waitFor(() => closed.length === 1)
+    // The app can distinguish this auth rejection from a transient drop.
+    expect(closed[0]).toEqual([4403, "org access denied"])
+
+    // Ample time for a (wrongly) scheduled reconnect to have fired.
+    await new Promise((r) => setTimeout(r, 150))
+    expect(opens).toBe(1)
+  })
+
+  it("a normal-closure drop (1000) still auto-reconnects; onClosed stays silent", async () => {
+    const room = "rcpol-1000-transient"
+    let opens = 0
+    const closed: Array<[number | undefined, string | undefined]> = []
+    const t = new WebSocketTransport({
+      url: `https://example.com/sync/${room}`,
+      reconnectDelayMs: 5,
+      onClosed: (code, reason) => closed.push([code, reason]),
+      open: async () => {
+        opens++
+        return openSocket(room)
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+    await serverDrop(room, 1000, "drop")
+    await waitFor(() => opens >= 2)
+    expect(closed.length).toBe(0)
+    t.close()
+  })
+
+  it("intentional close() is permanent: connect() works again but drops no longer auto-reconnect", async () => {
+    const room = "rcpol-close-permanent"
+    let opens = 0
+    const t = new WebSocketTransport({
+      url: `https://example.com/sync/${room}`,
+      reconnectDelayMs: 5,
+      open: async () => {
+        opens++
+        return openSocket(room)
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+    expect(opens).toBe(1)
+    t.close()
+
+    // connect() after close(): a new socket IS opened (close() nulled ws), but
+    // intentionallyClosed stays true…
+    await t.connect()
+    expect(opens).toBe(2)
+    // …so a subsequent unexpected drop performs NO auto-reconnect on this instance.
+    await serverDrop(room, 1000, "drop")
+    await new Promise((r) => setTimeout(r, 150))
+    expect(opens).toBe(2)
+  })
+})
+
+// --- Fake-socket tests: deterministic attempt-counter semantics ------------
+
+interface Fake {
+  ws: WebSocketLike
+  emit: (type: string, ev: object) => void
+}
+
+function makeFake(): Fake {
+  const listeners = new Map<string, Array<(ev: object) => void>>()
+  return {
+    emit: (type, ev) => {
+      for (const l of listeners.get(type) ?? []) l(ev)
+    },
+    ws: {
+      send: () => {},
+      close: () => {},
+      addEventListener: (type, l) => {
+        const arr = listeners.get(type) ?? []
+        arr.push(l as (ev: object) => void)
+        listeners.set(type, arr)
+      },
+      removeEventListener: () => {},
+    },
+  }
+}
+
+describe("reconnect attempt counter (drives the backoff)", () => {
+  it("grows across consecutive failed opens and resets after a successful open", async () => {
+    const attempts: Array<number> = []
+    const fakes: Array<Fake> = []
+    let failNext = 0
+    const t = new WebSocketTransport({
+      url: "wss://fake-backoff",
+      // Deterministic policy: record the attempt number the transport passes,
+      // retry almost immediately so the test never sleeps for real backoff.
+      reconnectDelay: (attempt) => {
+        attempts.push(attempt)
+        return 1
+      },
+      open: async () => {
+        if (failNext > 0) {
+          failNext--
+          throw new Error("server unreachable")
+        }
+        const f = makeFake()
+        fakes.push(f)
+        return f.ws
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+    expect(fakes.length).toBe(1)
+
+    // Outage: the next two open() attempts fail, the third succeeds. The
+    // policy must see a GROWING attempt number across the failures — this is
+    // what makes the default backoff exponential rather than fixed-interval.
+    failNext = 2
+    fakes[0]!.emit("close", { code: 1006 })
+    await waitFor(() => fakes.length === 2)
+    expect(attempts).toEqual([1, 2, 3])
+
+    // A drop after the successful open starts over at attempt 1 — otherwise a
+    // long-lived client would pay maximum backoff for every later blip.
+    fakes[1]!.emit("close", { code: 1006 })
+    await waitFor(() => fakes.length === 3)
+    expect(attempts).toEqual([1, 2, 3, 1])
+    t.close()
+  })
+
+  it("a custom policy returning null stops retrying; onClosed carries no code for a connect failure", async () => {
+    const closed: Array<[number | undefined, string | undefined]> = []
+    const fakes: Array<Fake> = []
+    let opens = 0
+    let failOpens = false
+    const t = new WebSocketTransport({
+      url: "wss://fake-stop",
+      reconnectDelay: (attempt) => (attempt >= 2 ? null : 1),
+      onClosed: (code, reason) => closed.push([code, reason]),
+      open: async () => {
+        opens++
+        if (failOpens) throw new Error("server unreachable")
+        const f = makeFake()
+        fakes.push(f)
+        return f.ws
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+    expect(opens).toBe(1)
+
+    // Drop, then the reconnect attempt fails (attempt 1 → retry), and the
+    // policy gives up on attempt 2. The connect-failure path has no close
+    // frame, so onClosed reports (undefined, undefined) — distinguishable
+    // from a server-sent application close.
+    failOpens = true
+    fakes[0]!.emit("close", { code: 1006, reason: "abnormal" })
+    await waitFor(() => closed.length === 1)
+    expect(closed[0]).toEqual([undefined, undefined])
+
+    const opensAtStop = opens
+    await new Promise((r) => setTimeout(r, 100))
+    expect(opens).toBe(opensAtStop) // no further attempts after the policy said stop
+    t.close()
+  })
+})

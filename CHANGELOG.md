@@ -8,18 +8,18 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-### Fixed
-
-- **Rejection `code` now survives tx-dedup replay (#21).** The dedup record
-  persisted only the rejection message, so a client retrying the same `txId`
-  got the reason with no machine-readable `code` — breaking code-based error
-  handling on exactly the retry path it exists for. `_sync_seen_tx` gains an
-  `error_code` column (added in place on wake for already-deployed DOs), and
-  the replayed `rejected` frame is now shaped identically to the original:
-  `{ code, message }` when a code was recorded, `{ message }` otherwise.
-
 ### Changed
 
+- **Transport reconnect policy (ADR-0016; fixes #25, #26).** The reconnect
+  delay is now an injectable policy function —
+  `reconnectDelay?: (attempt, closeCode?, closeReason?) => number | null`
+  (`null` = stop). The default (`defaultReconnectDelay`) replaces the fixed
+  interval with capped exponential backoff + full jitter (base =
+  `reconnectDelayMs`, default 250 ms; cap 30 s; attempt counter resets on a
+  successful open) and treats application close codes 4000-4999 as terminal,
+  so an accept-then-close auth rejection (e.g. 4403) no longer retries
+  forever. A terminal stop surfaces through the new `onClosed(code, reason)`
+  hook, making auth closes distinguishable from transient drops.
 - **Cohosting docs moved to `recipes/cohosting.md` and re-grounded.** The
   README's cohosting section shrinks to the pitch, the code sample, and a
   pointer; the recipe carries the rules, an honest account of what is verified
@@ -34,6 +34,13 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Fixed
 
+- **Rejection `code` now survives tx-dedup replay (#21).** The dedup record
+  persisted only the rejection message, so a client retrying the same `txId`
+  got the reason with no machine-readable `code` — breaking code-based error
+  handling on exactly the retry path it exists for. `_sync_seen_tx` gains an
+  `error_code` column (added in place on wake for already-deployed DOs), and
+  the replayed `rejected` frame is now shaped identically to the original:
+  `{ code, message }` when a code was recorded, `{ message }` otherwise.
 - **BLOB columns no longer corrupt to `{}` over the wire (ADR-0017,
   [#27](https://github.com/grrowl/tanstack-durable-object-sync/issues/27)).**
   workerd's `SqlStorage` returns BLOB values as bare `ArrayBuffer`, which the
