@@ -154,6 +154,14 @@ export class WebSocketTransport<Api = unknown> {
    *  or close() can cancel it — a stale timer from an earlier transient drop
    *  must never fire a further attempt after any of those. */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /** Bumped by close(). A connect() body captures it before awaiting open();
+   *  a mismatch after the await means close() ran mid-flight — the resolved
+   *  socket must be discarded, not installed. (close() can cancel the pending
+   *  timer, but not a connect() body already parked on a slow open() — without
+   *  this, that body resurrects a live, resubscribed socket after teardown.
+   *  An epoch rather than checking intentionallyClosed, because an explicit
+   *  connect() AFTER close() is allowed and must still install its socket.) */
+  private closeEpoch = 0
 
   constructor(opts: TransportOptions) {
     this.codec = opts.codec ?? createFrameCodec()
@@ -179,7 +187,18 @@ export class WebSocketTransport<Api = unknown> {
     if (this.ws) return
     if (this.connectPromise) return this.connectPromise
     this.connectPromise = (async () => {
+      const epoch = this.closeEpoch
       const ws = await this.open()
+      if (epoch !== this.closeEpoch) {
+        // close() ran while open() was in flight: the transport is torn down.
+        // Discard the orphan instead of installing it.
+        try {
+          ws.close()
+        } catch {
+          /* ignore */
+        }
+        return
+      }
       // Browsers default WebSocket.binaryType to "blob"; force "arraybuffer" so
       // binary frames arrive as ArrayBuffer (workerd already does). Without this
       // the codec can't decode and every server frame is silently dropped.
@@ -283,6 +302,7 @@ export class WebSocketTransport<Api = unknown> {
 
   close(): void {
     this.intentionallyClosed = true
+    this.closeEpoch++
     this.clearReconnectTimer()
     for (const w of this.seqWaiters.splice(0)) {
       clearTimeout(w.timer)

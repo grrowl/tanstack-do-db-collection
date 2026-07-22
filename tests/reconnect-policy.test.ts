@@ -338,4 +338,53 @@ describe("reconnect attempt counter (drives the backoff)", () => {
     expect(opens).toBe(2)
     t.close()
   })
+
+  it("close() during an in-flight reconnect open() cannot resurrect a socket after teardown", async () => {
+    // Post-PR codex adversarial pass: a transient drop arms the retry timer;
+    // the timer fires and open() is SLOW (TLS / Worker cold start). The app
+    // tears down with close() while that open() is still pending — close()
+    // can cancel the timer but not the already-running connect() body. When
+    // open() finally resolves, the socket must NOT be installed: otherwise a
+    // live, message-handling, resubscribed socket outlives teardown and
+    // "close() is permanent" is a lie. The orphan must be closed instead.
+    const fakes: Array<Fake> = []
+    let opens = 0
+    let releaseOpen: ((ws: WebSocketLike) => void) | null = null
+    const t = new WebSocketTransport({
+      url: "wss://fake-teardown-race",
+      reconnectDelay: () => 10,
+      open: async () => {
+        opens++
+        const f = makeFake()
+        fakes.push(f)
+        if (opens === 1) return f.ws
+        // The reconnect attempt: hold open() unresolved until the test says so.
+        return new Promise<WebSocketLike>((resolve) => {
+          releaseOpen = resolve
+        })
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+
+    fakes[0]!.emit("close", { code: 1006 }) // transient: retry armed for +10ms
+    await waitFor(() => releaseOpen !== null) // timer fired; open() is in flight
+
+    let orphanClosed = false
+    let orphanFrames = 0
+    const orphan = fakes[1]!
+    orphan.ws.close = () => {
+      orphanClosed = true
+    }
+    orphan.ws.send = () => {
+      orphanFrames++
+    }
+
+    t.close() // teardown while the reconnect open() is still pending
+    releaseOpen!(orphan.ws) // the slow open finally resolves, after teardown
+    await waitFor(() => orphanClosed) // the orphan socket is closed, not installed
+    expect(orphanFrames).toBe(0) // and never resubscribed to the server
+
+    await new Promise((r) => setTimeout(r, 50))
+    expect(opens).toBe(2) // nothing kept retrying after close()
+  })
 })
