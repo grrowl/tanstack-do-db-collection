@@ -1,0 +1,4 @@
+tags:
+  # Live-server suite (test/e2e_test.dart): needs `wrangler dev` on the chat
+  # example and DO_SYNC_E2E_URL set; self-skips otherwise.
+  e2e:

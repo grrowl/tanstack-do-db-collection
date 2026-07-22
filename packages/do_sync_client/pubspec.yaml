@@ -1,0 +1,16 @@
+name: do_sync_client
+description: >-
+  Dart client for tanstack-durable-object-sync: speaks the same wire protocol
+  (MessagePack frames, single-cursor stream, optimistic mutations) as the TS
+  browser client, against an unmodified SyncDurableObject. See ADR-0019.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.4.0
+
+# Zero runtime dependencies by design (ADR-0019 D5): the wire codec is
+# hand-rolled and pinned by cross-language conformance fixtures.
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0

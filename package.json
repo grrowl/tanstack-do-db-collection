@@ -50,6 +50,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "conformance:gen": "node --experimental-strip-types scripts/wire-conformance.mjs gen",
+    "conformance:verify": "node --experimental-strip-types scripts/wire-conformance.mjs verify",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

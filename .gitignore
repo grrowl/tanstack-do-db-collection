@@ -8,3 +8,9 @@ coverage/
 .vscode/
 *.tsbuildinfo
 .zed/
+
+# Dart (packages/do_sync_client)
+.dart_tool/
+pubspec.lock
+# conformance build artifact (dart test writes it; wire-conformance.mjs verify reads it)
+packages/do_sync_client/test/fixtures/dart_emitted.json
