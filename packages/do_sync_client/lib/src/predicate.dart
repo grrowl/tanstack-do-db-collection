@@ -113,13 +113,16 @@ _Eval _compileFunc(String name, List<Object?> args) {
     case 'in':
       final valueEval = compiled[0], arrayEval = compiled[1];
       return (row) {
-        final value = _normalize(valueEval(row));
+        // JS parity: `in` matches via normalizeValue(item) === value — NOT
+        // areValuesEqual — so bytes only match when small enough to normalize
+        // to a string key (see _normalizeIn). eq is the byte-comparing one.
+        final value = _normalizeIn(valueEval(row));
         final array = arrayEval(row);
         if (value == null) return null;
         if (array is! List<Object?>) return false;
         return array.any((item) {
-          final n = _normalize(item);
-          return n != null && _valuesEqual(n, value);
+          final n = _normalizeIn(item);
+          return n != null && n == value;
         });
       };
     case 'like':
@@ -152,12 +155,25 @@ _Eval _comparison(List<_Eval> compiled, bool Function(int) test) {
 }
 
 int? _compareValues(Object? a, Object? b) {
+  // JS relational operators coerce Date -> ms (valueOf), so `created_at > 200`
+  // works against a Date on either side. Mirror that BEFORE the typed cases.
+  if (a is DateTime && (b is num || b is DateTime)) {
+    return _compareValues(a.millisecondsSinceEpoch, b is DateTime ? b.millisecondsSinceEpoch : b);
+  }
+  if (b is DateTime && a is num) {
+    return _compareValues(a, b.millisecondsSinceEpoch);
+  }
   if (a is num && b is num) {
-    // IEEE semantics: NaN compares false against everything, like JS `>`.
-    if (a.isNaN || b.isNaN) return null;
-    return a.compareTo(b) == 0 ? 0 : (a < b ? -1 : 1);
+    // Direct </> like JS, NOT compareTo: IEEE semantics (NaN compares false
+    // against everything) and -0 == 0 (compareTo orders -0 below 0, which
+    // would make gt(-0.0, 0) true — adversarial review).
+    if (a < b) return -1;
+    if (a > b) return 1;
+    if (a == b) return 0;
+    return null; // NaN involved
   }
   if (a is BigInt && b is BigInt) return a.compareTo(b);
+  // JS DOES coerce bigint <-> number for relational operators (5n > 3).
   if (a is BigInt && b is num) {
     if (b.isNaN) return null;
     final ad = a.toDouble();
@@ -169,12 +185,23 @@ int? _compareValues(Object? a, Object? b) {
   }
   if (a is String && b is String) return a.compareTo(b); // code-unit order, like JS
   if (a is bool && b is bool) return (a ? 1 : 0).compareTo(b ? 1 : 0);
-  if (a is DateTime && b is DateTime) return a.compareTo(b);
   return null;
 }
 
-// eq/in normalization, mirroring @tanstack/db's normalizeValue: Date -> epoch
-// ms so Date literals and numeric columns cross-compare the way JS does.
+/// `in` normalization, mirroring @tanstack/db's normalizeValue exactly:
+/// Date -> epoch ms; bytes <= 128 long -> a string key (so small blobs match
+/// by content); LARGER bytes stay as-is, where JS `===` is object identity —
+/// two decoded wire values never match, and neither do two Dart [Uint8List]s
+/// under `==`. eq is different: it runs areValuesEqual, which byte-compares.
+Object? _normalizeIn(Object? v) {
+  if (v is DateTime) return v.millisecondsSinceEpoch;
+  if (v is Uint8List && v.length <= 128) return '__u8__${v.join(',')}';
+  return v;
+}
+
+/// eq normalization (normalizeValue without the byte-stringing shortcut —
+/// byte equality is handled structurally in [_valuesEqual], matching
+/// areValuesEqual which byte-compares any length).
 Object? _normalize(Object? v) {
   if (v is DateTime) return v.millisecondsSinceEpoch;
   return v;
@@ -188,8 +215,8 @@ bool _valuesEqual(Object? a, Object? b) {
     }
     return true;
   }
-  if (a is num && b is BigInt) return BigInt.from(a) == b && a == a.truncateToDouble();
-  if (a is BigInt && b is num) return _valuesEqual(b, a);
+  // NO num <-> BigInt bridge: JS `5n === 5` is false, and eq uses strict
+  // equality after normalize. (Relational ops DO coerce — see _compareValues.)
   return a == b; // Dart ==: int 5 == double 5.0, matching JS === on numbers
 }
 

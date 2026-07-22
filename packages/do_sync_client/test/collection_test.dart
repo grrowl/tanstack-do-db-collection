@@ -249,6 +249,49 @@ void main() {
     expect(transport.appliedCursor, '8');
   });
 
+  test('insert-then-update of the same key in one mutate: preflight and view see the merged row', () async {
+    final c = SyncCollection(transport, 'messages', where: eq('author', 'alice'));
+    final sub = await subIdOf(c);
+    socket.receive(SnapEndFrame(sub: sub, seq: '1'));
+    await pump();
+
+    // The update op alone ({v: 2}) has no author and would spuriously fail
+    // the where preflight unless the fold sees the preceding insert.
+    final fut = c.mutate([
+      MutOp.insert('k1', {'id': 'k1', 'author': 'alice', 'v': 1}),
+      MutOp.update('k1', {'v': 2}),
+    ]);
+    expect(c.get('k1'), {'id': 'k1', 'author': 'alice', 'v': 2});
+    await pump();
+    final mut = socket.sent.whereType<MutFrame>().single;
+    socket.receive(RejectedFrame(txId: mut.txId, message: 'no'));
+    await expectLater(fut, throwsA(isA<MutationRejectedException>()));
+  });
+
+  test('rejecting an earlier tx keeps a later same-key overlay row whole', () async {
+    final c = SyncCollection(transport, 'messages');
+    final sub = await subIdOf(c);
+    socket.receive(SnapEndFrame(sub: sub, seq: '1'));
+    await pump();
+
+    final insertFut = c.insert({'id': 'k1', 'author': 'a', 'v': 1}); // tx1
+    final updateFut = c.update('k1', {'v': 2}); // tx2, partial cols
+    expect(c.get('k1'), {'id': 'k1', 'author': 'a', 'v': 2});
+    await pump();
+
+    // Reject tx1 only: tx2's captured modified row must keep the full shape,
+    // not collapse to the bare {v: 2} patch (adversarial review).
+    final muts = socket.sent.whereType<MutFrame>().toList();
+    socket.receive(RejectedFrame(txId: muts[0].txId, message: 'no'));
+    await expectLater(insertFut, throwsA(isA<MutationRejectedException>()));
+    expect(c.get('k1'), {'id': 'k1', 'author': 'a', 'v': 2},
+        reason: 'later overlay entry replays its captured full row');
+
+    socket.receive(RejectedFrame(txId: muts[1].txId, message: 'no'));
+    await expectLater(updateFut, throwsA(isA<MutationRejectedException>()));
+    expect(c.get('k1'), isNull);
+  });
+
   test('multi-op mutate is one frame, one overlay, retired together', () async {
     final c = SyncCollection(transport, 'messages');
     final sub = await subIdOf(c);

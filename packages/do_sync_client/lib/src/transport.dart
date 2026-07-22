@@ -85,11 +85,15 @@ typedef ReconnectDelayFn = Duration? Function(int attempt, int? closeCode, Strin
 /// application close codes (4000-4999) are terminal: the server closed
 /// deliberately (e.g. an auth rejection), so retrying cannot succeed.
 ReconnectDelayFn defaultReconnectDelay(Duration base, {Duration cap = const Duration(seconds: 30)}) {
-  final capMs = max(cap.inMilliseconds, base.inMilliseconds);
+  final capMs = max(cap.inMilliseconds, base.inMilliseconds).toDouble();
   final rng = Random();
   return (attempt, closeCode, closeReason) {
     if (closeCode != null && closeCode >= 4000 && closeCode <= 4999) return null;
-    final ceiling = min(capMs, base.inMilliseconds * (1 << (attempt - 1)));
+    // Double arithmetic like the TS policy (baseMs * 2 ** (attempt-1)): the
+    // exponential saturates at the cap instead of wrapping — 64-bit int `<<`
+    // here would overflow to <= 0 around attempt 57 and turn a long outage
+    // into a zero-delay reconnect hot loop (adversarial review).
+    final ceiling = min(capMs, base.inMilliseconds * pow(2.0, attempt - 1).toDouble());
     return Duration(milliseconds: (rng.nextDouble() * ceiling).floor());
   };
 }

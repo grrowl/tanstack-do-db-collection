@@ -157,6 +157,24 @@ void main() {
     expect(resub.limit, 5);
   });
 
+  test('default backoff never wraps to zero at high attempt counts', () {
+    // The int `<<` version overflowed around attempt 57, collapsing a long
+    // outage into a zero-delay reconnect hot loop (adversarial review). The
+    // policy must saturate at the cap forever, like the TS double arithmetic.
+    final policy = defaultReconnectDelay(const Duration(milliseconds: 250));
+    for (final attempt in [1, 10, 56, 57, 63, 64, 100, 1000]) {
+      var sawPositive = false;
+      for (var i = 0; i < 50; i++) {
+        final d = policy(attempt, null, null);
+        expect(d, isNotNull);
+        expect(d!.inMilliseconds, greaterThanOrEqualTo(0));
+        expect(d.inMilliseconds, lessThanOrEqualTo(30000));
+        if (d.inMilliseconds > 0) sawPositive = true;
+      }
+      expect(sawPositive, isTrue, reason: 'attempt $attempt: jitter ceiling collapsed to zero');
+    }
+  });
+
   test('application close 4000-4999 is terminal: no retry, onClosed fires', () async {
     int? closedCode;
     final t = makeTransport(

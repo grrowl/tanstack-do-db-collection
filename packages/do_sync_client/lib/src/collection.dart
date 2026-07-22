@@ -34,10 +34,15 @@ class WriteOutsideSubException implements Exception {
 
 int _subSeq = 0;
 
-/// One pending optimistic transaction: the ops of a single `mut` frame.
+/// One pending optimistic transaction: the ops of a single `mut` frame, each
+/// with the FULL modified row captured at mutation time (null for a delete).
+/// Replaying captured rows — rather than re-merging partial cols — keeps the
+/// merged view whole even when an earlier same-key transaction is rejected
+/// out from under a later one (TanStack recomputes from captured `modified`;
+/// adversarial review).
 class _PendingTx {
-  _PendingTx(this.ops);
-  final List<MutOp> ops;
+  _PendingTx(this.entries);
+  final List<({MutOp op, Row? modified})> entries;
 }
 
 class SyncCollection {
@@ -92,20 +97,13 @@ class SyncCollection {
   Map<String, Row> get rows {
     final out = <String, Row>{for (final e in _mirror.entries) e.key: Map.of(e.value)};
     for (final tx in _pending.values) {
-      for (final op in tx.ops) {
-        final key = op.key as String;
-        switch (op.type) {
-          case RowOp.insert:
-            out[key] = Map.of(op.cols!);
-          case RowOp.update:
-            final base = out[key];
-            if (base != null) {
-              base.addAll(op.cols!);
-            } else {
-              out[key] = Map.of(op.cols!);
-            }
-          case RowOp.delete:
-            out.remove(key);
+      for (final entry in tx.entries) {
+        final key = entry.op.key as String;
+        final modified = entry.modified;
+        if (modified == null) {
+          out.remove(key);
+        } else {
+          out[key] = Map.of(modified);
         }
       }
     }
@@ -209,23 +207,35 @@ class SyncCollection {
   /// The overlay applies immediately; it retires on `committed` (the deltas
   /// have already landed in the mirror) and rolls back on rejection/timeout.
   Future<void> mutate(List<MutOp> ops) async {
-    final effective = rows;
+    // Fold ops over a working copy so a later op in the SAME transaction sees
+    // the earlier ones (insert-then-update must preflight/display the merged
+    // row), capturing each op's full modified row for the overlay.
+    final working = rows;
+    final entries = <({MutOp op, Row? modified})>[];
     for (final op in ops) {
-      if (_where == null || op.type == RowOp.delete) continue;
-      // Eager filtered preflight on the full modified row, like the TS client.
-      final modified = switch (op.type) {
-        RowOp.insert => op.cols!,
-        RowOp.update => {...?effective[op.key as String], ...op.cols!},
-        RowOp.delete => throw StateError('unreachable'),
+      final key = op.key as String;
+      final Row? modified = switch (op.type) {
+        RowOp.insert => Map.of(op.cols!),
+        RowOp.update => {...?working[key], ...op.cols!},
+        RowOp.delete => null,
       };
-      if (!_matches(modified)) {
+      if (_where != null && modified != null && !_matches(modified)) {
+        // Eager filtered preflight on the full modified row, like the TS
+        // client: a write outside the static `where` would never be confirmed
+        // by a delta — reject before any I/O.
         throw WriteOutsideSubException(
-          "write to '$table' (key '${op.key}') falls outside the collection's where filter",
+          "write to '$table' (key '$key') falls outside the collection's where filter",
         );
       }
+      if (modified == null) {
+        working.remove(key);
+      } else {
+        working[key] = modified;
+      }
+      entries.add((op: op, modified: modified));
     }
     final txId = '$table#mut#${++_mutSeq}#${DateTime.now().microsecondsSinceEpoch}';
-    _pending[txId] = _PendingTx(ops);
+    _pending[txId] = _PendingTx(entries);
     _emit();
     try {
       await transport.sendMut(MutFrame(txId: txId, collection: table, ops: ops));

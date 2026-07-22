@@ -6,6 +6,8 @@
 // these; this suite proves the Dart evaluator lands on the same rows, so all
 // THREE membership deciders agree.
 
+import 'dart:typed_data';
+
 import 'package:do_sync_client/do_sync_client.dart';
 import 'package:test/test.dart';
 
@@ -130,6 +132,49 @@ void main() {
       expect(compilePredicate(gt('n', 1))({'n': 1.5}), isTrue);
       expect(compilePredicate(eq('n', 5))({'n': 5.0}), isTrue);
       expect(compilePredicate(gt('n', 1))({'n': double.nan}), isFalse);
+    });
+  });
+
+  group('adversarial-review parity pins', () {
+    test('eq does NOT bridge BigInt and num (JS: 5n === 5 is false)…', () {
+      // An int64 column arrives as Dart BigInt (JS bigint); a numeric literal
+      // must not eq-match it, or the Dart preflight admits writes the server's
+      // delta evaluator will move-out.
+      expect(compilePredicate(eq('big', 5))({'big': BigInt.from(5)}), isFalse);
+      expect(compilePredicate(eq('big', BigInt.from(5)))({'big': BigInt.from(5)}), isTrue);
+    });
+
+    test('…but relational ops DO coerce BigInt vs num (JS: 5n > 3 is true)', () {
+      expect(compilePredicate(gt('big', 3))({'big': BigInt.from(5)}), isTrue);
+      expect(compilePredicate(lt('big', 3))({'big': BigInt.from(5)}), isFalse);
+    });
+
+    test('relational ops coerce Date vs number like JS valueOf', () {
+      final d300 = DateTime.fromMillisecondsSinceEpoch(300, isUtc: true);
+      expect(compilePredicate(gt('t', 200))({'t': d300}), isTrue);
+      expect(compilePredicate(gt('t', d300))({'t': 400}), isTrue);
+      expect(compilePredicate(lt('t', d300))({'t': 400}), isFalse);
+    });
+
+    test('in matches small blobs by content, large blobs by identity (JS threshold 128)', () {
+      final small = Uint8List.fromList(List.filled(64, 7));
+      final smallCopy = Uint8List.fromList(List.filled(64, 7));
+      expect(compilePredicate(inList('b', [smallCopy]))({'b': small}), isTrue);
+
+      final large = Uint8List.fromList(List.filled(200, 7));
+      final largeCopy = Uint8List.fromList(List.filled(200, 7));
+      // JS: normalizeValue leaves >128-byte arrays as objects; `===` is
+      // identity, so a decoded wire value never matches -> false.
+      expect(compilePredicate(inList('b', [largeCopy]))({'b': large}), isFalse);
+      // eq is the byte-comparing path (areValuesEqual): still true.
+      expect(compilePredicate(eq('b', largeCopy))({'b': large}), isTrue);
+    });
+
+    test('gt(-0.0, 0) is false like JS (compareTo would order them)', () {
+      expect(compilePredicate(gt('n', 0))({'n': -0.0}), isFalse);
+      expect(compilePredicate(lt('n', 0))({'n': -0.0}), isFalse);
+      expect(compilePredicate(gte('n', 0))({'n': -0.0}), isTrue);
+      expect(compilePredicate(eq('n', 0))({'n': -0.0}), isTrue);
     });
   });
 }
