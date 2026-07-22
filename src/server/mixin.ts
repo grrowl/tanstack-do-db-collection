@@ -570,7 +570,7 @@ export function Syncable<Env = unknown, TUser = unknown>() {
           return this.#rejectTx(ws, f.txId, "mutation failed", "EXECUTE_FAILED")
         }
 
-        recordTx(this.#sql, f.txId, true, commitSeq, null, null)
+        recordTx(this.#sql, f.txId, true, commitSeq, null, null, null)
         // Enqueue deltas for all subscribers, then flush THIS socket before its
         // receipt (C1) so its deltas land first. Other subscribers flush on the
         // coalescer tick.
@@ -638,14 +638,14 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         }
 
         const commitSeq = String(currentSeq(this.#sql))
-        recordTx(this.#sql, f.txId, true, commitSeq, null, stored)
+        recordTx(this.#sql, f.txId, true, commitSeq, null, null, stored)
         this.#drainAndBroadcast()
         this.#broadcaster.flushOne(ws)
         this.#send(ws, { t: "committed", txId: f.txId, seq: commitSeq, result })
       }
 
       #rejectTx(ws: WebSocket, txId: string, message: string, code?: string): void {
-        recordTx(this.#sql, txId, false, null, message, null)
+        recordTx(this.#sql, txId, false, null, message, code ?? null, null)
         this.#send(ws, { t: "rejected", txId, error: code ? { code, message } : { message } })
       }
 
@@ -653,7 +653,11 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         if (seen.ok) {
           this.#send(ws, { t: "committed", txId, seq: seen.cursor ?? "0", result: decodeResult(seen.result) })
         } else {
-          this.#send(ws, { t: "rejected", txId, error: { message: seen.error ?? "unknown" } })
+          // Shape the replay exactly like #rejectTx's original frame — with the
+          // persisted code when there was one (issue #21) — so a retrying client's
+          // code-based handling sees the same outcome either way.
+          const message = seen.error ?? "unknown"
+          this.#send(ws, { t: "rejected", txId, error: seen.errorCode ? { code: seen.errorCode, message } : { message } })
         }
       }
 

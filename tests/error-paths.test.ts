@@ -170,6 +170,36 @@ describe("mutation error paths (atomicity, fail-loud, exactly-once)", () => {
     const r2 = second[second.length - 1]! as Extract<ServerFrame, { t: "rejected" }>
     expect(r2.t).toBe("rejected")
     expect(r2.error.message).toBe(r1.error.message)
+    // A code-less rejection must replay code-less — the replayed frame is shaped
+    // identically to the original, so a client can't tell replay from first send.
+    expect(r1.error.code).toBeUndefined()
+    expect(r2.error.code).toBeUndefined()
+    ws.close()
+  })
+
+  it("a retried CODED rejection replays with the identical code (issue #21)", async () => {
+    // WHY: the machine-readable `code` exists so clients can branch on the cause
+    // (VALIDATION vs EXECUTE_FAILED, ...) — and the dedup replay path is exactly
+    // where a retrying client re-reads the outcome. If the code is dropped from
+    // the persisted record, code-based handling breaks precisely on the retry it
+    // was built for, while the first response looks fine in every test.
+    const ws = await openWs("/sync/err-retry-coded")
+    // Empty `body` fails the `validated` collection's schema → VALIDATION code.
+    const frame: ClientFrame = { t: "mut", txId: "v1", collection: "validated", ops: [{ type: "insert", key: "a", cols: { id: "a", body: "" } }] }
+
+    send(ws, frame)
+    const first = await collectUntil(ws, (f) => f.t === "rejected" || f.t === "committed")
+    const r1 = first[first.length - 1]! as Extract<ServerFrame, { t: "rejected" }>
+    expect(r1.t).toBe("rejected")
+    expect(r1.error.code).toBe("VALIDATION")
+
+    // Retry the exact same frame — the replayed rejection must carry the same code.
+    send(ws, frame)
+    const second = await collectUntil(ws, (f) => f.t === "rejected" || f.t === "committed")
+    const r2 = second[second.length - 1]! as Extract<ServerFrame, { t: "rejected" }>
+    expect(r2.t).toBe("rejected")
+    expect(r2.error.code).toBe("VALIDATION")
+    expect(r2.error.message).toBe(r1.error.message)
     ws.close()
   })
 })

@@ -8,6 +8,16 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Rejection `code` now survives tx-dedup replay (#21).** The dedup record
+  persisted only the rejection message, so a client retrying the same `txId`
+  got the reason with no machine-readable `code` — breaking code-based error
+  handling on exactly the retry path it exists for. `_sync_seen_tx` gains an
+  `error_code` column (added in place on wake for already-deployed DOs), and
+  the replayed `rejected` frame is now shaped identically to the original:
+  `{ code, message }` when a code was recorded, `{ message }` otherwise.
+
 ### Changed
 
 - **Cohosting docs moved to `recipes/cohosting.md` and re-grounded.** The
