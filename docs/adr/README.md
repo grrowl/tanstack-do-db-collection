@@ -25,3 +25,4 @@ explains the displacement.
 | [0016](./0016-reconnect-policy.md) | Transport reconnect policy: injectable delay function, terminal 4xxx, jittered backoff | Accepted |
 | [0017](./0017-blob-wire-normalization.md) | BLOB wire normalization: bare ArrayBuffer becomes Uint8Array at emission | Accepted |
 | [0018](./0018-oversize-frames.md) | Oversize frames: client pre-send guard is the rejection surface; outbound is warn-only | Accepted |
+| [0019](./0019-client-agnostic-wire-contract-dart-client.md) | The wire protocol is a client-agnostic contract; a Dart client mirrors it | Accepted |
