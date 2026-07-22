@@ -7,7 +7,7 @@ import { type SubHandler, WebSocketTransport, type WebSocketLike } from "../src/
 // the cached connectPromise stays a rejected promise forever: every subsequent
 // connect() returns the same stale rejection, no close event ever fires (the
 // socket never opened), and no further retry is ever scheduled. One outage
-// longer than reconnectDelayMs permanently kills all subscriptions until reload.
+// longer than the reconnect delay permanently kills all subscriptions until reload.
 
 interface Recorder {
   events: Array<[string, ...Array<unknown>]>
@@ -43,7 +43,7 @@ describe("transport reconnect recovery — failed open must not wedge the client
 
     const t = new WebSocketTransport({
       url: `https://example.com/sync/${room}`,
-      reconnectDelayMs: 20,
+      reconnectDelay: 20,
       open: async () => {
         if (failNext > 0) {
           failNext--
@@ -106,7 +106,7 @@ describe("transport reconnect recovery — failed open must not wedge the client
 
     const t = new WebSocketTransport({
       url: "wss://fake-recovery",
-      reconnectDelayMs: 20,
+      reconnectDelay: 20,
       open: async () => {
         if (!allowOpen) throw new Error("server unreachable")
         // Return a fake WebSocketLike that does nothing — we just need the

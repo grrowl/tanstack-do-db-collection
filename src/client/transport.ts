@@ -74,12 +74,12 @@ export interface TransportOptions {
   codec?: FrameCodec
   /** Confirmation/await timeout in ms. */
   timeoutMs?: number
-  /** Base delay (ms) for the DEFAULT reconnect policy's backoff — the attempt-1
-   *  jitter ceiling. Ignored when `reconnectDelay` is provided. */
-  reconnectDelayMs?: number
-  /** Reconnect delay policy; replaces the default (`defaultReconnectDelay`).
-   *  Return `null` to stop reconnecting. */
-  reconnectDelay?: ReconnectDelayFn
+  /** Reconnect pacing. A number is the base delay (ms) for the default
+   *  jittered-backoff policy (`defaultReconnectDelay`) — the attempt-1 jitter
+   *  ceiling. A function is the full policy; return `null` to stop
+   *  reconnecting. Default: `defaultReconnectDelay(250)`. A truly fixed delay
+   *  is a policy too: `() => 500`. */
+  reconnectDelay?: number | ReconnectDelayFn
   /** Called when an unexpected drop is TERMINAL — the policy returned `null`
    *  (default: any 4000-4999 application close, e.g. an auth rejection) — so
    *  the app can tell "re-auth needed" from a transient blip the transport is
@@ -166,7 +166,8 @@ export class WebSocketTransport<Api = unknown> {
   constructor(opts: TransportOptions) {
     this.codec = opts.codec ?? createFrameCodec()
     this.timeoutMs = opts.timeoutMs ?? 5000
-    this.reconnectDelay = opts.reconnectDelay ?? defaultReconnectDelay(opts.reconnectDelayMs ?? 250)
+    this.reconnectDelay =
+      typeof opts.reconnectDelay === "function" ? opts.reconnectDelay : defaultReconnectDelay(opts.reconnectDelay ?? 250)
     this.onClosed = opts.onClosed
     this.open =
       opts.open ??

@@ -10,16 +10,17 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Changed
 
-- **Transport reconnect policy (ADR-0016; fixes #25, #26).** The reconnect
-  delay is now an injectable policy function —
-  `reconnectDelay?: (attempt, closeCode?, closeReason?) => number | null`
-  (`null` = stop). The default (`defaultReconnectDelay`) replaces the fixed
-  interval with capped exponential backoff + full jitter (base =
-  `reconnectDelayMs`, default 250 ms; cap 30 s; attempt counter resets on a
-  successful open) and treats application close codes 4000-4999 as terminal,
-  so an accept-then-close auth rejection (e.g. 4403) no longer retries
-  forever. A terminal stop surfaces through the new `onClosed(code, reason)`
-  hook, making auth closes distinguishable from transient drops.
+- **Transport reconnect policy (ADR-0016; fixes #25, #26).** One option,
+  `reconnectDelay?: number | ((attempt, closeCode?, closeReason?) => number | null)`
+  (`null` = stop), replaces `reconnectDelayMs` (**breaking**, pre-1.0: a
+  number keeps the old meaning — the default policy's base delay). The
+  default (`defaultReconnectDelay`) replaces the fixed interval with capped
+  exponential backoff + full jitter (base 250 ms; cap 30 s; attempt counter
+  resets on a successful open) and treats application close codes 4000-4999
+  as terminal, so an accept-then-close auth rejection (e.g. 4403) no longer
+  retries forever. A terminal stop surfaces through the new
+  `onClosed(code, reason)` hook, making auth closes distinguishable from
+  transient drops.
 - **Cohosting docs moved to `recipes/cohosting.md` and re-grounded.** The
   README's cohosting section shrinks to the pitch, the code sample, and a
   pointer; the recipe carries the rules, an honest account of what is verified

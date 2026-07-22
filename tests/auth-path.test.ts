@@ -183,7 +183,7 @@ describe("auth path: upgrade statuses and application close codes", () => {
     const closed: Array<[number | undefined, string | undefined]> = []
     const t = new WebSocketTransport({
       url: `https://example.com/sync/${room}`,
-      reconnectDelayMs: 5,
+      reconnectDelay: 5,
       onClosed: (code, reason) => closed.push([code, reason]),
       open: async () => {
         opens++

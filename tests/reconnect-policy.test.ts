@@ -88,7 +88,7 @@ describe("transport reconnect policy (ADR-0016)", () => {
     const closed: Array<[number | undefined, string | undefined]> = []
     const t = new WebSocketTransport({
       url: `https://example.com/sync/${room}`,
-      reconnectDelayMs: 5,
+      reconnectDelay: 5,
       onClosed: (code, reason) => closed.push([code, reason]),
       open: async () => {
         opens++
@@ -114,7 +114,7 @@ describe("transport reconnect policy (ADR-0016)", () => {
     const closed: Array<[number | undefined, string | undefined]> = []
     const t = new WebSocketTransport({
       url: `https://example.com/sync/${room}`,
-      reconnectDelayMs: 5,
+      reconnectDelay: 5,
       onClosed: (code, reason) => closed.push([code, reason]),
       open: async () => {
         opens++
@@ -133,7 +133,7 @@ describe("transport reconnect policy (ADR-0016)", () => {
     let opens = 0
     const t = new WebSocketTransport({
       url: `https://example.com/sync/${room}`,
-      reconnectDelayMs: 5,
+      reconnectDelay: 5,
       open: async () => {
         opens++
         return openSocket(room)
