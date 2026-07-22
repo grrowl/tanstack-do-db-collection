@@ -45,6 +45,27 @@ export class MutationRejectedError extends Error {
   }
 }
 
+/** Reconnect delay policy (ADR-0016). Called once per reconnect attempt with
+ *  the 1-based attempt number (reset to 1 after each successful open) and,
+ *  when the drop came from a socket close, that close's code/reason (a failed
+ *  `open()` has no close frame, so both are undefined). Return the delay in ms
+ *  before the next attempt, or `null` to stop reconnecting (terminal — the
+ *  transport surfaces it via `onClosed`). */
+export type ReconnectDelayFn = (attempt: number, closeCode?: number, closeReason?: string) => number | null
+
+/** The default reconnect policy: capped exponential backoff with full jitter —
+ *  a uniform delay in [0, min(cap, base·2^(attempt−1))], cap 30 s (never below
+ *  the base) — and application close codes (4000-4999) are terminal: the
+ *  server closed deliberately (e.g. an accept-then-close 4403 auth rejection),
+ *  so retrying cannot succeed. */
+export function defaultReconnectDelay(baseMs: number, capMs = 30_000): ReconnectDelayFn {
+  const cap = Math.max(capMs, baseMs)
+  return (attempt, closeCode) => {
+    if (closeCode !== undefined && closeCode >= 4000 && closeCode <= 4999) return null
+    return Math.random() * Math.min(cap, baseMs * 2 ** (attempt - 1))
+  }
+}
+
 export interface TransportOptions {
   url: string
   /** Returns a CONNECTED socket. Default opens `new WebSocket(url)` and resolves
@@ -53,9 +74,17 @@ export interface TransportOptions {
   codec?: FrameCodec
   /** Confirmation/await timeout in ms. */
   timeoutMs?: number
-  /** Delay before an auto-reconnect attempt after an unexpected drop (ms).
-   *  Fixed for now; production should layer exponential backoff + jitter. */
-  reconnectDelayMs?: number
+  /** Reconnect pacing. A number is the base delay (ms) for the default
+   *  jittered-backoff policy (`defaultReconnectDelay`) — the attempt-1 jitter
+   *  ceiling. A function is the full policy; return `null` to stop
+   *  reconnecting. Default: `defaultReconnectDelay(250)`. A truly fixed delay
+   *  is a policy too: `() => 500`. */
+  reconnectDelay?: number | ReconnectDelayFn
+  /** Called when an unexpected drop is TERMINAL — the policy returned `null`
+   *  (default: any 4000-4999 application close, e.g. an auth rejection) — so
+   *  the app can tell "re-auth needed" from a transient blip the transport is
+   *  still retrying. Never called for an intentional `close()`. */
+  onClosed?: (code: number | undefined, reason: string | undefined) => void
 }
 
 interface SeqWaiter {
@@ -116,12 +145,30 @@ export class WebSocketTransport<Api = unknown> {
   private intentionallyClosed = false
   /** True while reconnecting, so connect() resubscribes on success. */
   private reconnecting = false
-  private readonly reconnectDelayMs: number
+  private readonly reconnectDelay: ReconnectDelayFn
+  private readonly onClosed?: (code: number | undefined, reason: string | undefined) => void
+  /** Consecutive reconnect attempts since the last successful open; the
+   *  1-based value passed to the policy. */
+  private reconnectAttempt = 0
+  /** The one pending reconnect timer, so a successful open, a terminal stop,
+   *  or close() can cancel it — a stale timer from an earlier transient drop
+   *  must never fire a further attempt after any of those. */
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  /** Bumped by close(). A connect() body captures it before awaiting open();
+   *  a mismatch after the await means close() ran mid-flight — the resolved
+   *  socket must be discarded, not installed. (close() can cancel the pending
+   *  timer, but not a connect() body already parked on a slow open() — without
+   *  this, that body resurrects a live, resubscribed socket after teardown.
+   *  An epoch rather than checking intentionallyClosed, because an explicit
+   *  connect() AFTER close() is allowed and must still install its socket.) */
+  private closeEpoch = 0
 
   constructor(opts: TransportOptions) {
     this.codec = opts.codec ?? createFrameCodec()
     this.timeoutMs = opts.timeoutMs ?? 5000
-    this.reconnectDelayMs = opts.reconnectDelayMs ?? 250
+    this.reconnectDelay =
+      typeof opts.reconnectDelay === "function" ? opts.reconnectDelay : defaultReconnectDelay(opts.reconnectDelay ?? 250)
+    this.onClosed = opts.onClosed
     this.open =
       opts.open ??
       (() =>
@@ -141,7 +188,18 @@ export class WebSocketTransport<Api = unknown> {
     if (this.ws) return
     if (this.connectPromise) return this.connectPromise
     this.connectPromise = (async () => {
+      const epoch = this.closeEpoch
       const ws = await this.open()
+      if (epoch !== this.closeEpoch) {
+        // close() ran while open() was in flight: the transport is torn down.
+        // Discard the orphan instead of installing it.
+        try {
+          ws.close()
+        } catch {
+          /* ignore */
+        }
+        return
+      }
       // Browsers default WebSocket.binaryType to "blob"; force "arraybuffer" so
       // binary frames arrive as ArrayBuffer (workerd already does). Without this
       // the codec can't decode and every server frame is silently dropped.
@@ -151,26 +209,25 @@ export class WebSocketTransport<Api = unknown> {
         /* some socket impls don't expose binaryType; codec handles AB/Uint8Array */
       }
       ws.addEventListener("message", (ev) => this.onMessage(ev.data))
-      ws.addEventListener("close", () => {
+      ws.addEventListener("close", (ev) => {
+        // Only the CURRENT socket's close may detach/reconnect. A stale
+        // socket's late close (delivered after close()+connect() installed a
+        // fresh socket) must not null the live connection (codex review).
+        if (this.ws !== ws) return
         this.ws = null
         this.connectPromise = null
         // Auto-reconnect on an unexpected drop while subscriptions are active.
         if (!this.intentionallyClosed && this.handlers.size > 0) {
-          // The flag is set at SCHEDULING time, not in the timer: a demand-
-          // driven connect() (a mutation inside the reconnect window) may
-          // establish the fresh socket first, and it must run the resubscribe
-          // path too — or every subscription is silently dead on the new
-          // socket and the late timer wedges the flag (pre-existing bug, found
-          // in the ADR-0011 grill).
-          this.reconnecting = true
-          setTimeout(() => {
-            void this.connect().catch(() => {
-              /* next attempt retries on the following close */
-            })
-          }, this.reconnectDelayMs)
+          const { code, reason } = ev as { code?: number; reason?: string }
+          this.scheduleReconnect(code, reason)
         }
       })
       this.ws = ws
+      // A successful open resets the backoff: a later blip starts from the
+      // policy's first-attempt delay again, not the accumulated one. It also
+      // supersedes any pending timer (a demand-driven connect beat it).
+      this.reconnectAttempt = 0
+      this.clearReconnectTimer()
       // On a reconnect, re-establish every subscription from our single applied
       // cursor so the server serves a windowed catch-up rather than a snapshot.
       if (this.reconnecting) {
@@ -185,15 +242,47 @@ export class WebSocketTransport<Api = unknown> {
     this.connectPromise.catch(() => {
       this.connectPromise = null
       if (!this.intentionallyClosed && this.handlers.size > 0) {
-        this.reconnecting = true
-        setTimeout(() => {
-          void this.connect().catch(() => {
-            /* next attempt retries on the following close */
-          })
-        }, this.reconnectDelayMs)
+        // A socket that never opened has no close frame — the policy sees an
+        // undefined code (backoff, under the default).
+        this.scheduleReconnect()
       }
     })
     return this.connectPromise
+  }
+
+  /** Consult the policy and either arm the next reconnect attempt or stop. */
+  private scheduleReconnect(closeCode?: number, closeReason?: string): void {
+    // The flag is set at SCHEDULING time, not in the timer: a demand-driven
+    // connect() (a mutation inside the reconnect window) may establish the
+    // fresh socket first, and it must run the resubscribe path too — or every
+    // subscription is silently dead on the new socket and the late timer
+    // wedges the flag (pre-existing bug, found in the ADR-0011 grill). It is
+    // also set on a TERMINAL close, so an app-driven connect() after e.g.
+    // re-auth still resubscribes from the cursor.
+    this.reconnecting = true
+    // At most one pending attempt: a newer drop supersedes an older timer.
+    this.clearReconnectTimer()
+    const delay = this.reconnectDelay(++this.reconnectAttempt, closeCode, closeReason)
+    if (delay === null) {
+      // Terminal (default: application close 4000-4999, e.g. an
+      // accept-then-close auth rejection): retrying cannot help — surface the
+      // close to the app instead of looping against the DO.
+      this.onClosed?.(closeCode, closeReason)
+      return
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      void this.connect().catch(() => {
+        /* next attempt retries via the connect-failure path above */
+      })
+    }, delay)
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
   }
 
   /** Re-send a `sub` for every registered subscription, carrying `since`. */
@@ -214,6 +303,8 @@ export class WebSocketTransport<Api = unknown> {
 
   close(): void {
     this.intentionallyClosed = true
+    this.closeEpoch++
+    this.clearReconnectTimer()
     for (const w of this.seqWaiters.splice(0)) {
       clearTimeout(w.timer)
       w.reject(new Error("transport closed"))

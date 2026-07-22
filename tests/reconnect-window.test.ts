@@ -7,7 +7,7 @@ import type { ClientFrame, ServerFrame } from "../src/wire/frames.ts"
 // design (the bug itself is in the plain reconnect path, present on this
 // branch; the forced-reconnect machinery is not). The `reconnecting` flag was
 // set inside the reconnect TIMER, so a connect() triggered on demand — a
-// mutation fired within reconnectDelayMs of a drop — established the fresh
+// mutation fired within the reconnect delay of a drop — established the fresh
 // socket with the flag still false: NO resubscribeAll, every subscription
 // silently dead (the server has no subs for the new socket), and the late
 // timer's connect() early-returned, wedging the flag. The flag must be set
@@ -56,7 +56,7 @@ describe("reconnect window (drop → demand-driven connect before the timer)", (
     const fakes: Array<Fake> = []
     const t = new WebSocketTransport({
       url: "wss://fake",
-      reconnectDelayMs: 60_000, // the timer must NOT be what saves us
+      reconnectDelay: () => 60_000, // FIXED policy: the timer must NOT be what saves us (jitter could fire early)
       open: () => {
         const f = makeFake()
         fakes.push(f)

@@ -18,7 +18,7 @@ import type { TestApi } from "./test-worker.ts"
 function makeTransport(room: string): WebSocketTransport<TestApi> {
   return new WebSocketTransport<TestApi>({
     url: `https://example.com/sync/${room}`,
-    reconnectDelayMs: 20,
+    reconnectDelay: 20,
     open: async () => {
       const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
       const ws = res.webSocket
