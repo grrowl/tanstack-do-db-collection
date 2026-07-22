@@ -1,6 +1,7 @@
 import { env, runInDurableObject } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { assertSyncCompatible, hydrateRows, initSchema, installTriggers, readChangesSince } from "../src/server/changes.ts"
+import { lookupTx, recordTx } from "../src/server/dedup.ts"
 
 // WHY: ADR-0007 makes the author own schema + migrations and only validates the
 // real table at registerSync. Two promises ride on that and are easy to assert
@@ -65,6 +66,36 @@ describe("author-owned schema evolution (ADR-0007)", () => {
       // And a single write still yields exactly one change row (no duplicate capture).
       sql.exec(`INSERT INTO t(id, v) VALUES ('x', '1')`)
       expect(readChangesSince(sql, 0).length).toBe(1)
+    })
+  })
+
+  it("upgrades a pre-error_code _sync_seen_tx on wake, idempotently", async () => {
+    // WHY: `_sync_seen_tx` is CREATE IF NOT EXISTS, so a DO deployed before the
+    // `error_code` column (issue #21) wakes with the old shape and CREATE alone
+    // will never add it — recordTx/lookupTx would then throw on every dedup hit.
+    // initSchema must ALTER the old table in place, and stay idempotent since it
+    // re-runs on every wake.
+    await inDO("seen-tx-migrate", (sql) => {
+      // Simulate the already-deployed DO: the table exists in its OLD shape.
+      sql.exec(`CREATE TABLE _sync_seen_tx (
+                  tx_id  TEXT PRIMARY KEY,
+                  ok     INTEGER NOT NULL,
+                  cursor TEXT,
+                  error  TEXT,
+                  result TEXT,
+                  ts     INTEGER NOT NULL
+                )`)
+      sql.exec("INSERT INTO _sync_seen_tx(tx_id,ok,cursor,error,result,ts) VALUES('old',0,null,'boom',null,0)")
+
+      initSchema(sql) // next wake
+      initSchema(sql) // and the one after — ALTER must not run twice
+
+      const cols = Array.from(sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('_sync_seen_tx')")).map((c) => c.name)
+      expect(cols).toContain("error_code")
+      // Pre-migration rows replay code-less; post-migration writes carry the code.
+      expect(lookupTx(sql, "old")).toMatchObject({ ok: false, error: "boom", errorCode: null })
+      recordTx(sql, "new", false, null, "invalid", "VALIDATION", null)
+      expect(lookupTx(sql, "new")).toMatchObject({ error: "invalid", errorCode: "VALIDATION" })
     })
   })
 

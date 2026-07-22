@@ -40,13 +40,21 @@ export function initSchema(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS _sync_meta (k TEXT PRIMARY KEY, v TEXT)`)
   // Mutation/command dedup (exactly-once under retry). See dedup.ts.
   sql.exec(`CREATE TABLE IF NOT EXISTS _sync_seen_tx (
-              tx_id  TEXT PRIMARY KEY,
-              ok     INTEGER NOT NULL,
-              cursor TEXT,
-              error  TEXT,
-              result TEXT,
-              ts     INTEGER NOT NULL
+              tx_id      TEXT PRIMARY KEY,
+              ok         INTEGER NOT NULL,
+              cursor     TEXT,
+              error      TEXT,
+              error_code TEXT,
+              result     TEXT,
+              ts         INTEGER NOT NULL
             )`)
+  // `error_code` was added after tables shipped without it (issue #21): a DO
+  // created earlier wakes with the old shape, and CREATE IF NOT EXISTS won't
+  // touch it. ADD COLUMN isn't idempotent on its own, so gate on table_info.
+  const seenTxCols = Array.from(sql.exec<{ name: string }>("SELECT name FROM pragma_table_info('_sync_seen_tx')"))
+  if (!seenTxCols.some((c) => c.name === "error_code")) {
+    sql.exec("ALTER TABLE _sync_seen_tx ADD COLUMN error_code TEXT")
+  }
 }
 
 /**
