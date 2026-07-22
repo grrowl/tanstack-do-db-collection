@@ -14,7 +14,7 @@
 // The socket opener is injectable: the browser default is `new WebSocket(url)`;
 // other runtimes (and tests) provide an already-connected socket.
 
-import { createFrameCodec, type FrameCodec } from "../wire/frame-codec.ts"
+import { createFrameCodec, type FrameCodec, type WireOut } from "../wire/frame-codec.ts"
 import type { ClientFrame, RowOp, ServerFrame } from "../wire/frames.ts"
 
 /** Minimal structural socket — satisfied by both browser WebSocket and a
@@ -34,6 +34,14 @@ export interface SubHandler {
   onUptodate(): void
   onReset(): void
 }
+
+/** Cloudflare's inbound WebSocket edge cap, ~1 MiB (ADR-0018). An
+ *  infrastructure FACT, not an application preference: both wire endpoints
+ *  ship in this package and the only supported infra fixes the number, so it
+ *  is a constant, not a knob — a knob could only lower it pointlessly or
+ *  raise it into the edge cap's lie. If Cloudflare changes the cap, this
+ *  constant changes with an ADR note. Mirrors the server's ADR-0012 default. */
+const MAX_FRAME_BYTES = 1_048_576
 
 export class MutationRejectedError extends Error {
   constructor(
@@ -405,6 +413,23 @@ export class WebSocketTransport<Api = unknown> {
   }
 
   private async sendAwaitingReceipt(frame: ClientFrame, txId: string): Promise<{ result?: unknown }> {
+    // Pre-send size guard (ADR-0018): the reliable half of oversize handling.
+    // Cloudflare's edge caps inbound WS messages at ~1 MiB, so an oversize
+    // frame may never reach the DO — waiting for a server rejection would just
+    // be the confirmation timeout. Reject here, typed and immediate, so the
+    // optimistic overlay rolls back promptly. Encode once; the bytes are
+    // reused for the actual send.
+    const encoded = this.codec.encode(frame)
+    // A string frame (the JSON debug codec) goes over the wire as UTF-8 —
+    // measure bytes, not UTF-16 code units, or non-ASCII payloads undercount
+    // and slip past the guard only to die at the edge cap (codex review).
+    const bytes = typeof encoded === "string" ? new TextEncoder().encode(encoded).byteLength : encoded.byteLength
+    if (bytes > MAX_FRAME_BYTES) {
+      throw new MutationRejectedError(
+        `frame too large (${bytes} bytes > the ${MAX_FRAME_BYTES}-byte inbound WebSocket edge cap)`,
+        "FRAME_TOO_LARGE",
+      )
+    }
     await this.connect()
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -412,13 +437,26 @@ export class WebSocketTransport<Api = unknown> {
         reject(new Error(`confirmation timeout: txId=${txId}`))
       }, this.timeoutMs)
       this.pendingTx.set(txId, { resolve, reject, timer })
-      this.sendFrame(frame)
+      // A socket may refuse a send synchronously (workerd does for frames over
+      // its own cap). Clean up the waiter/timer before rejecting, or the stale
+      // entry lingers with an armed timeout for timeoutMs (codex review).
+      try {
+        this.sendRaw(encoded)
+      } catch (e) {
+        clearTimeout(timer)
+        this.pendingTx.delete(txId)
+        reject(e instanceof Error ? e : new Error(String(e)))
+      }
     })
   }
 
   private sendFrame(frame: ClientFrame): void {
+    this.sendRaw(this.codec.encode(frame))
+  }
+
+  private sendRaw(data: WireOut): void {
     if (!this.ws) throw new Error("transport not connected")
-    this.ws.send(this.codec.encode(frame))
+    this.ws.send(data)
   }
 
   private onMessage(data: unknown): void {
