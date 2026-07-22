@@ -126,3 +126,13 @@ re-enters backoff on the very next close anyway, one attempt later).
   jittered 60 s base can land near 0).
 - The `open()`-listener workaround for observing close codes is obsolete;
   `onClosed` is the supported surface.
+- **Future unification (deliberate deferral).** The three race guards that
+  adversarial review accreted — the tracked reconnect timer, the
+  stale-socket close-event guard (`this.ws !== ws`), and the close-epoch
+  check after `await open()` — could collapse into one generation counter:
+  *a continuation is only valid in the generation it was created in* (bump on
+  close / install / schedule; check at each continuation head). That demotes
+  a forgotten cleanup from "resurrected socket" to "one late no-op". Not done
+  here: the current shape is pinned by the race tests and has passed two
+  adversarial reviews; unify when this file is next touched, with those same
+  tests as the harness.
