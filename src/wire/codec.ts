@@ -1,8 +1,9 @@
 // Tagged value codec (ADR-0001 D17).
 //
 // Lossless transport + at-rest encoding for values JSON cannot represent on its
-// own: bigint, Date, NaN, ±Infinity, -0, undefined, and Uint8Array. Naive
-// `JSON.stringify` silently corrupts every one of these.
+// own: bigint, Date, NaN, ±Infinity, -0, undefined, and Uint8Array (plus bare
+// ArrayBuffer, normalized to Uint8Array — ADR-0017). Naive `JSON.stringify`
+// silently corrupts every one of these.
 //
 // Collision-proof by construction: special values are replaced by neutral
 // placeholders in the payload, and their (path, type) is recorded in a separate
@@ -38,6 +39,10 @@ function classify(v: unknown): TypeTag | null {
       if (v === null) return null
       if (v instanceof Date) return "date"
       if (v instanceof Uint8Array) return "u8"
+      // workerd's SqlStorage returns BLOB columns as bare ArrayBuffer; bare
+      // JSON stringifies it as {}. Normalize to bytes at emission — decodes as
+      // Uint8Array, same as a Uint8Array input (ADR-0017).
+      if (v instanceof ArrayBuffer) return "u8"
       return null
     case "function":
     case "symbol":
@@ -54,7 +59,7 @@ function toPlaceholder(tag: TypeTag, v: unknown): unknown {
     case "date":
       return (v as Date).getTime()
     case "u8":
-      return Array.from(v as Uint8Array)
+      return Array.from(v instanceof ArrayBuffer ? new Uint8Array(v) : (v as Uint8Array))
     case "-0":
       return 0
     case "nan":

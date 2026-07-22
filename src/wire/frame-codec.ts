@@ -13,7 +13,7 @@
 // saves ~9 bytes/frame, dwarfed by row payloads, so it is deferred to M9 and
 // measured rather than assumed. Flagged here rather than silently dropped.
 
-import { decode as mpDecode, encode as mpEncode } from "@msgpack/msgpack"
+import { decode as mpDecode, encode as mpEncode, ExtensionCodec } from "@msgpack/msgpack"
 import { decode as valueDecode, encode as valueEncode } from "./codec.ts"
 import type { ClientFrame, ServerFrame } from "./frames.ts"
 
@@ -36,7 +36,23 @@ function toBytes(d: WireIn): Uint8Array {
   return new TextEncoder().encode(d)
 }
 
-const MSGPACK_OPTS = { useBigInt64: true } as const
+// workerd's SqlStorage returns BLOB columns as bare ArrayBuffer. @msgpack/msgpack
+// only special-cases ArrayBuffer.isView, so a bare ArrayBuffer would fall through
+// to encodeMap and arrive as {} — silently (issue #27, ADR-0017). The extension
+// codec is consulted before that fallthrough: encode the raw bytes, decode to
+// Uint8Array so BLOBs land on the client exactly like a Uint8Array column value.
+const ARRAY_BUFFER_EXT_TYPE = 0
+const extensionCodec = new ExtensionCodec()
+extensionCodec.register({
+  type: ARRAY_BUFFER_EXT_TYPE,
+  encode: (v) => (v instanceof ArrayBuffer ? new Uint8Array(v) : null),
+  // Copy out of the decode buffer: `bytes` is a subarray VIEW of the whole
+  // incoming frame — returning it as-is would alias the wire buffer (mutable
+  // by the caller) and keep the full frame alive behind a small BLOB.
+  decode: (bytes) => bytes.slice(), // Uint8Array — normalized, never back to ArrayBuffer
+})
+
+const MSGPACK_OPTS = { useBigInt64: true, extensionCodec } as const
 
 const binaryCodec: FrameCodec = {
   binary: true,

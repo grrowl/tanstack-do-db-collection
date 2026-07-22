@@ -66,6 +66,30 @@ for (const binary of [true, false]) {
       expect(row.nested).toEqual({ a: [1, 2, 3], b: "z" })
     })
 
+    it("normalizes a bare ArrayBuffer row value (workerd BLOB) to Uint8Array", () => {
+      // workerd's SqlStorage returns BLOB columns as bare ArrayBuffer. msgpack
+      // only special-cases ArrayBuffer.isView, so without normalization a bare
+      // ArrayBuffer fell through to encodeMap and arrived as {} — silently
+      // (issue #27). Both codecs must deliver the bytes as a Uint8Array.
+      const f: ServerFrame = {
+        t: "snap",
+        sub: "s",
+        key: "k",
+        row: { payload: new Uint8Array([1, 2, 254]).buffer },
+        seq: "1",
+      }
+      const encoded = codec.encode(f)
+      const r = codec.decode(encoded) as Extract<ServerFrame, { t: "snap" }>
+      const payload = (r.row as Record<string, unknown>).payload
+      expect(payload).toBeInstanceOf(Uint8Array)
+      expect(Array.from(payload as Uint8Array)).toEqual([1, 2, 254])
+      // The decoded bytes must be a COPY, not a view aliasing the wire buffer:
+      // an aliased view is mutable through the transport's buffer and pins the
+      // whole frame allocation behind a small BLOB.
+      if (encoded instanceof Uint8Array) encoded.fill(0)
+      expect(Array.from(payload as Uint8Array)).toEqual([1, 2, 254])
+    })
+
     it(`encodes as ${binary ? "Uint8Array" : "string"}`, () => {
       const out = codec.encode({ t: "uptodate", seq: "1" })
       if (binary) expect(out).toBeInstanceOf(Uint8Array)

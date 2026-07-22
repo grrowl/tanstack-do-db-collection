@@ -22,6 +22,17 @@ While pre-1.0, the public API may change between 0.x releases.
   sync over a plain `DurableObject` base — which Actors' own examples document.
   Supersedes the 0.5.0 "host defect" phrasing.
 
+### Fixed
+
+- **BLOB columns no longer corrupt to `{}` over the wire (ADR-0017,
+  [#27](https://github.com/grrowl/tanstack-durable-object-sync/issues/27)).**
+  workerd's `SqlStorage` returns BLOB values as bare `ArrayBuffer`, which the
+  msgpack encoder fell through to `encodeMap` on (and the JSON debug codec
+  stringified as `{}`) — clients silently received an empty object, for
+  snapshots and deltas alike. Both codecs now normalize `ArrayBuffer` at
+  emission, so BLOB columns arrive on the client as a `Uint8Array` with the
+  exact bytes.
+
 ## [0.5.1] — 2026-07-03
 
 ### Fixed

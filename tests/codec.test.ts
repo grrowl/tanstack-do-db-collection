@@ -57,6 +57,17 @@ describe("tagged value codec", () => {
     expect(Array.from(r as Uint8Array)).toEqual([0, 1, 2, 254, 255])
   })
 
+  it("normalizes a bare ArrayBuffer (workerd BLOB) to Uint8Array", () => {
+    // workerd's SqlStorage returns BLOB columns as bare ArrayBuffer, which
+    // bare JSON stringifies to {} — silent corruption (issue #27). Normalized
+    // at emission: the decoder yields a Uint8Array with the exact bytes.
+    const r = roundtrip({ payload: new Uint8Array([1, 2, 255]).buffer }) as {
+      payload: unknown
+    }
+    expect(r.payload).toBeInstanceOf(Uint8Array)
+    expect(Array.from(r.payload as Uint8Array)).toEqual([1, 2, 255])
+  })
+
   it("does not misinterpret user data shaped like an internal tag", () => {
     // Collision-proofing: this object must survive as plain data.
     const v = { $type: "bigint", value: "not-a-bigint", m: [[[], "date"]] }
