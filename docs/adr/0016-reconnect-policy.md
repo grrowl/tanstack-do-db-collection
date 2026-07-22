@@ -84,8 +84,12 @@ re-enters backoff on the very next close anyway, one attempt later).
   resubscribe path (pre-existing bug, ADR-0011 grill). `scheduleReconnect`
   sets it before consulting the policy; a *terminal* close also sets it, so an
   app-driven `connect()` after re-auth still resubscribes from the cursor.
-- **No idle timers.** Backoff timers only exist while a reconnect is pending;
-  an idle or terminally-closed transport arms nothing.
+- **No idle timers.** At most one reconnect timer exists, and only while a
+  retry is pending: the handle is tracked and cancelled on a successful open,
+  on a terminal stop, on `close()`, and when a newer drop supersedes it.
+  Without this (adversarial-review catch), a stale timer from a transient
+  drop could fire after a later terminal 4xxx close and resurrect the
+  connection — retrying past "stop" and double-firing `onClosed`.
 
 ## Alternatives considered
 

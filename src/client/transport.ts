@@ -150,6 +150,10 @@ export class WebSocketTransport<Api = unknown> {
   /** Consecutive reconnect attempts since the last successful open; the
    *  1-based value passed to the policy. */
   private reconnectAttempt = 0
+  /** The one pending reconnect timer, so a successful open, a terminal stop,
+   *  or close() can cancel it — a stale timer from an earlier transient drop
+   *  must never fire a further attempt after any of those. */
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(opts: TransportOptions) {
     this.codec = opts.codec ?? createFrameCodec()
@@ -196,8 +200,10 @@ export class WebSocketTransport<Api = unknown> {
       })
       this.ws = ws
       // A successful open resets the backoff: a later blip starts from the
-      // policy's first-attempt delay again, not the accumulated one.
+      // policy's first-attempt delay again, not the accumulated one. It also
+      // supersedes any pending timer (a demand-driven connect beat it).
       this.reconnectAttempt = 0
+      this.clearReconnectTimer()
       // On a reconnect, re-establish every subscription from our single applied
       // cursor so the server serves a windowed catch-up rather than a snapshot.
       if (this.reconnecting) {
@@ -230,6 +236,8 @@ export class WebSocketTransport<Api = unknown> {
     // also set on a TERMINAL close, so an app-driven connect() after e.g.
     // re-auth still resubscribes from the cursor.
     this.reconnecting = true
+    // At most one pending attempt: a newer drop supersedes an older timer.
+    this.clearReconnectTimer()
     const delay = this.reconnectDelay(++this.reconnectAttempt, closeCode, closeReason)
     if (delay === null) {
       // Terminal (default: application close 4000-4999, e.g. an
@@ -238,11 +246,19 @@ export class WebSocketTransport<Api = unknown> {
       this.onClosed?.(closeCode, closeReason)
       return
     }
-    setTimeout(() => {
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
       void this.connect().catch(() => {
         /* next attempt retries via the connect-failure path above */
       })
     }, delay)
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
   }
 
   /** Re-send a `sub` for every registered subscription, carrying `since`. */
@@ -263,6 +279,7 @@ export class WebSocketTransport<Api = unknown> {
 
   close(): void {
     this.intentionallyClosed = true
+    this.clearReconnectTimer()
     for (const w of this.seqWaiters.splice(0)) {
       clearTimeout(w.timer)
       w.reject(new Error("transport closed"))

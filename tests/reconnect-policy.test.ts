@@ -256,4 +256,58 @@ describe("reconnect attempt counter (drives the backoff)", () => {
     expect(opens).toBe(opensAtStop) // no further attempts after the policy said stop
     t.close()
   })
+
+  it("a stale transient-drop timer cannot resurrect the transport after a terminal close", async () => {
+    // Codex-review scenario: transient drop arms a delayed retry; a
+    // demand-driven connect() beats the timer, and THAT socket is closed
+    // terminally (4403). "Terminal means stop" must win — the earlier timer
+    // must not fire a further attempt (or a duplicate onClosed) later.
+    const closed: Array<[number | undefined, string | undefined]> = []
+    const fakes: Array<Fake> = []
+    let opens = 0
+    const t = new WebSocketTransport({
+      url: "wss://fake-stale-timer",
+      reconnectDelay: (_attempt, code) => (code !== undefined && code >= 4000 && code <= 4999 ? null : 50),
+      onClosed: (code, reason) => closed.push([code, reason]),
+      open: async () => {
+        opens++
+        const f = makeFake()
+        fakes.push(f)
+        return f.ws
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+
+    fakes[0]!.emit("close", { code: 1006 }) // transient: retry timer armed for +50ms
+    await t.connect() // demand-driven connect wins the race
+    expect(opens).toBe(2)
+    fakes[1]!.emit("close", { code: 4403, reason: "forbidden" }) // terminal
+    await waitFor(() => closed.length === 1)
+
+    await new Promise((r) => setTimeout(r, 150)) // well past the stale timer
+    expect(opens).toBe(2) // the stale timer did not reconnect…
+    expect(closed).toEqual([[4403, "forbidden"]]) // …and onClosed fired exactly once
+    t.close()
+  })
+
+  it("close() during the reconnect window cancels the pending retry", async () => {
+    const fakes: Array<Fake> = []
+    let opens = 0
+    const t = new WebSocketTransport({
+      url: "wss://fake-close-cancels",
+      reconnectDelay: () => 30,
+      open: async () => {
+        opens++
+        const f = makeFake()
+        fakes.push(f)
+        return f.ws
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+    fakes[0]!.emit("close", { code: 1006 }) // retry armed for +30ms
+    t.close() // the app shut the transport down before the timer fired
+
+    await new Promise((r) => setTimeout(r, 100))
+    expect(opens).toBe(1) // an intentional close() leaves nothing running
+  })
 })
