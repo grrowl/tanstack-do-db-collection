@@ -8,6 +8,20 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+### Changed
+
+- **Cohosting docs moved to `recipes/cohosting.md` and re-grounded.** The
+  README's cohosting section shrinks to the pitch, the code sample, and a
+  pointer; the recipe carries the rules, an honest account of what is verified
+  and how (CI fake-host tests vs. source audit at pinned versions vs. the
+  untested wake restore), and a reframed `@cloudflare/actors` story. Verified
+  against `@cloudflare/actors@0.0.1-beta.6`: the `Actor` class hibernates fine
+  on its own but won't cohost out of the box (its `Sockets` helper takes over
+  socket connections completely and `Actor` claims the DO-wide auto-response
+  slot), while the Actors helpers (`Alarms`, `Storage`) compose cleanly with
+  sync over a plain `DurableObject` base — which Actors' own examples document.
+  Supersedes the 0.5.0 "host defect" phrasing.
+
 ### Fixed
 
 - **BLOB columns no longer corrupt to `{}` over the wire (ADR-0017,
