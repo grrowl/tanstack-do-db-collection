@@ -1,7 +1,7 @@
-/// <reference types="@cloudflare/vitest-pool-workers" />
+/// <reference types="@cloudflare/vitest-pool-workers/types" />
 
-declare module "cloudflare:test" {
-  interface ProvidedEnv {
+declare namespace Cloudflare {
+  interface Env {
     TEST_DO: DurableObjectNamespace
     SYNC_DO: DurableObjectNamespace
     UNREG_DO: DurableObjectNamespace

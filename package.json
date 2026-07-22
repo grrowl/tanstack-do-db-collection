@@ -59,11 +59,11 @@
     "@tanstack/db": ">=0.6.0"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.12.21",
+    "@cloudflare/vitest-pool-workers": "0.18.7",
     "@cloudflare/workers-types": "^4.20260518.1",
     "@tanstack/db": "0.6.5",
     "typescript": "^5.7",
-    "vitest": "3.2.4",
+    "vitest": "4.1.10",
     "wrangler": "^4"
   }
 }
