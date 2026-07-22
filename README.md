@@ -360,6 +360,20 @@ show. The conventions, what's verified and how, and the full
 
 ---
 
+## Other clients
+
+The wire protocol is a client-agnostic contract
+([ADR-0019](./docs/adr/0019-client-agnostic-wire-contract-dart-client.md)):
+frames, the MessagePack value mapping, and the predicate floor are versioned
+and conformance-tested, so non-TS clients can speak to the same DO.
+
+- **[`packages/do_sync_client`](./packages/do_sync_client)** — a Dart client
+  for Flutter: same single-cursor stream and optimistic mutations, with a
+  mirror + overlay in place of TanStack DB (reads compose client-side in
+  Dart). Eager mode; zero runtime dependencies.
+
+---
+
 ## Non-goals
 
 - **Multi-DO transactions.** A transaction touches collections in one DO.

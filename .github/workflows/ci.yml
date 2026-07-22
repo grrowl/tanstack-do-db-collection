@@ -40,3 +40,45 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # The Dart client (packages/do_sync_client, ADR-0019) speaks the same wire
+  # protocol; its suite plus the cross-language conformance pass (production
+  # TS codec on both sides) gate wire changes.
+  dart-client:
+    name: dart client · analyze · test · wire conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Pub get
+        working-directory: packages/do_sync_client
+        run: dart pub get
+
+      - name: Analyze
+        working-directory: packages/do_sync_client
+        run: dart analyze --fatal-infos
+
+      # Regenerate golden frames from the production codec at HEAD, run the
+      # Dart suite against them (which also emits Dart-encoded frames), then
+      # verify those decode identically in the production codec (ADR-0019 D6).
+      - name: Wire conformance fixtures (TS -> Dart)
+        run: npm run conformance:gen
+
+      - name: Dart tests
+        working-directory: packages/do_sync_client
+        run: dart test
+
+      - name: Wire conformance verify (Dart -> TS)
+        run: npm run conformance:verify

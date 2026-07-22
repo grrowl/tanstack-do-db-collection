@@ -10,6 +10,26 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Added
 
+- **Dart client — `packages/do_sync_client` (ADR-0019).** A zero-dependency
+  Dart package speaking the same wire protocol against an unmodified
+  `SyncDurableObject`, targeting Flutter. The wire protocol (frames, the
+  MessagePack value mapping, and the ADR-0013 predicate floor) is now a
+  **client-agnostic public contract**: a change to it requires an ADR and a
+  conformance-fixture update, and CI gates it with a cross-language pass
+  (`scripts/wire-conformance.mjs` — the production TS codec encodes golden
+  frames the Dart suite must decode, and decodes Dart-emitted frames back to
+  deep-equal values). Instead of porting TanStack DB, the Dart client pairs a
+  synced mirror with a pending-mutation overlay (client-supplied pk makes
+  optimistic id == confirmed id, so rollback is dropping the overlay) and
+  ports the transport invariants directly: single cursor advanced only at
+  commit boundaries, batch-atomic application, held-key-insert-as-upsert,
+  reset/truncate, jittered reconnect with `since` catch-up and terminal
+  4000-4999 closes, the 1 MiB pre-send guard, and the eager-`where` write
+  preflight backed by a Dart port of the floor evaluator. Eager mode only for
+  now; on-demand windows and the cursor `fetch` are deferred (ADR-0019 D4).
+  Verified end-to-end against a live workerd DO (snapshot, cross-client
+  deltas, optimistic confirm, authorize-rejection rollback, command results).
+
 - **Typed oversize-frame handling (ADR-0018; part of
   [#28](https://github.com/grrowl/tanstack-durable-object-sync/issues/28)).**
   An oversize client mutation used to be dropped silently server-side
