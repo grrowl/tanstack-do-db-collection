@@ -32,12 +32,34 @@ WebSocket limits):
 
 ## Decisions
 
+### D0: The limits are infrastructure facts, not application preferences
+
+Cloudflare's ~1 MiB inbound edge cap is a **fact about the one infrastructure
+this library supports** — and both wire endpoints ship in this package. Facts
+don't get knobs. The thresholds below are therefore module-level **constants**
+(`MAX_FRAME_BYTES` in the transport, `WARN_OUTBOUND_FRAME_BYTES` in the
+mixin), both `1_048_576`. If Cloudflare changes the cap, the constants change
+with an ADR note.
+
+**Rejected alternative — configurable limits** (a `maxFrameBytes` transport
+option and a `warnOutboundFrameBytes: number | null` protected tunable, in an
+earlier revision of this branch): rejected on review. Since we control both
+sides and support exactly one infra, a client-side knob could only be set
+*below* the cap (pointless — the server and edge still enforce the fact) or
+*above* it (a lie — the guard would wave through frames the edge then kills,
+reintroducing exactly the silent-timeout failure this ADR removes). The
+warn-threshold knob likewise had no honest setting other than the cap itself;
+`null`-disabling it only hid the one production breadcrumb.
+
+The overall shape: **inbound = enforced constant; outbound = deliberately
+unenforced** (breaking a correct broadcast to save bandwidth would invert the
+failure hierarchy), with the D3 warning as the only production breadcrumb.
+
 ### D1: Client pre-send guard — the reliable half
 
-`WebSocketTransport` gains `maxFrameBytes` (default `1_048_576`, aligned with
-the server's ADR-0012 default and the edge cap). Before sending a `mut` or
-`call`, the transport encodes the frame once, checks the encoded size, and on
-breach rejects **locally and immediately** with the existing typed surface:
+Before sending a `mut` or `call`, the transport encodes the frame once,
+checks the encoded size against `MAX_FRAME_BYTES`, and on breach rejects
+**locally and immediately** with the existing typed surface:
 `MutationRejectedError` with code `"FRAME_TOO_LARGE"`. No round trip, no
 timeout; the optimistic overlay rolls back promptly through TanStack's normal
 rejected-mutation path. The encoded bytes are reused for the actual send, so
@@ -69,12 +91,11 @@ comment says so.
 
 ### D3: Outbound is warn-only — observability, not enforcement
 
-A new tunable, `warnOutboundFrameBytes: number | null` (default `1_048_576`,
-`null` disables), following the ADR-0012 `protected readonly` knob pattern.
-When an encoded outbound frame exceeds it, the DO logs a `console.warn` with
-the frame type, byte size, and the collection (resolved from the socket's
-subscription registry only on the warn path — never a hot-path lookup). The
-frame is **still sent whole**.
+When an encoded outbound frame exceeds `WARN_OUTBOUND_FRAME_BYTES` (fixed
+1 MiB, per D0), the DO logs a `console.warn` with the frame type, byte size,
+the collection (resolved from the socket's subscription registry only on the
+warn path — never a hot-path lookup), and a pointer at the real fix (column
+projection, issue #28). The frame is **still sent whole**.
 
 Why not split or drop: outbound has no edge cap, so delivery works; splitting
 would need a reassembly protocol for a problem whose real fix is sending less
@@ -88,12 +109,11 @@ that they are paying the full-row-hydration cost.
   `MutationRejectedError` / `"FRAME_TOO_LARGE"` instead of a 5 s generic
   timeout; optimistic state rolls back promptly. Pinned by
   `tests/frame-limits.test.ts` (raw transport and collection-level rollback).
-- A client with a raised `maxFrameBytes` still hits the production edge cap;
-  the option exists to *align* with a self-hosted or changed limit, not to
-  bypass Cloudflare's.
+- No new public API surface: both thresholds are constants (D0), so there is
+  nothing to configure and nothing to misconfigure.
 - Large outbound rows keep working exactly as before (whole, single frame) —
-  now with a warning naming the collection when they cross the threshold.
-  Operators who consider that noise can set `warnOutboundFrameBytes = null`.
+  now with a warning naming the collection and pointing at column projection
+  (#28) when they cross the threshold.
 - The server's silent inbound drop is unchanged and remains pinned by
   `tests/wire-hardening.test.ts`; its comment now explains why it stays
   silent. Its measure for **string** frames is still `message.length`

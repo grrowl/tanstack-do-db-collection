@@ -47,6 +47,14 @@ import { SubscriptionRegistry, type Sub } from "./subscriptions.ts"
  *  this tag, so tddc never touches a host's sockets and vice versa (ADR-0015). */
 export const SYNC_TAG = "_tddc"
 
+/** Outbound frame-size warning threshold (ADR-0018): observability only, and
+ *  deliberately NOT a knob. Inbound is enforced at the edge-cap constant;
+ *  outbound is deliberately unenforced — breaking a correct broadcast to save
+ *  bandwidth would invert the failure hierarchy — so this warn is the one
+ *  production breadcrumb. The real fix for oversize full-row rebroadcasts is
+ *  column projection (issue #28). */
+const WARN_OUTBOUND_FRAME_BYTES = 1_048_576
+
 /** Runtime options for the mixin. `configure()` in your constructor.
  *  Numeric tuning knobs stay protected overridable fields (see ADR-0015). */
 export interface SyncableOptions<TUser = unknown> {
@@ -143,13 +151,6 @@ export function Syncable<Env = unknown, TUser = unknown>() {
       protected readonly maxSubsPerSocket: number = 256
       /** Maximum inbound frame size in bytes (ADR-0012). */
       protected readonly maxFrameBytes: number = 1_048_576
-      /** Outbound frame-size warning threshold in bytes (ADR-0018).
-       *  Observability, not enforcement: outbound WS messages are not
-       *  edge-capped the way inbound ones are, and splitting or dropping a
-       *  hydrated full-row frame would be worse than delivering it — the real
-       *  fix for oversized re-sends is column projection (issue #28a). `null`
-       *  disables the warning. Default 1 MiB (mirrors `maxFrameBytes`). */
-      protected readonly warnOutboundFrameBytes: number | null = 1_048_576
 
       // ---- internal machinery (private — off the collision surface) ----------
       #compiled: CompiledSync<TUser, Env> | undefined
@@ -884,23 +885,22 @@ export function Syncable<Env = unknown, TUser = unknown>() {
       }
 
       /** Encode and send a server frame on one socket. Warns — and still sends
-       *  whole — when the encoded frame exceeds `warnOutboundFrameBytes`
+       *  whole — when the encoded frame exceeds `WARN_OUTBOUND_FRAME_BYTES`
        *  (ADR-0018): observability for hydrated full-row re-sends, whose real
-       *  fix is column projection (issue #28a). */
+       *  fix is column projection (issue #28). */
       #send(ws: WebSocket, frame: ServerFrame): void {
         const encoded = this.#codec.encode(frame)
-        if (this.warnOutboundFrameBytes !== null) {
-          const bytes = typeof encoded === "string" ? encoded.length : encoded.byteLength
-          if (bytes > this.warnOutboundFrameBytes) {
-            // Resolve the sub's collection only on the warn path (linear scan
-            // over this socket's subs — never on the hot path).
-            const subId = (frame as { sub?: string }).sub
-            const collection = subId ? this.#subs.forWs(ws).find((s) => s.subId === subId)?.collection : undefined
-            const where = collection ? ` for collection '${collection}'` : subId ? ` for sub '${subId}'` : ""
-            console.warn(
-              `outbound '${frame.t}' frame is ${bytes} bytes (> warnOutboundFrameBytes ${this.warnOutboundFrameBytes})${where}`,
-            )
-          }
+        const bytes = typeof encoded === "string" ? encoded.length : encoded.byteLength
+        if (bytes > WARN_OUTBOUND_FRAME_BYTES) {
+          // Resolve the sub's collection only on the warn path (linear scan
+          // over this socket's subs — never on the hot path).
+          const subId = (frame as { sub?: string }).sub
+          const collection = subId ? this.#subs.forWs(ws).find((s) => s.subId === subId)?.collection : undefined
+          const where = collection ? ` for collection '${collection}'` : subId ? ` for sub '${subId}'` : ""
+          console.warn(
+            `oversize outbound '${frame.t}' frame (${bytes} bytes > ${WARN_OUTBOUND_FRAME_BYTES})${where} — ` +
+              `full-row rebroadcast; column projection (issue #28) is the real fix`,
+          )
         }
         ws.send(encoded)
       }

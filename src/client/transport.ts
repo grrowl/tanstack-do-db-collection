@@ -35,6 +35,14 @@ export interface SubHandler {
   onReset(): void
 }
 
+/** Cloudflare's inbound WebSocket edge cap, ~1 MiB (ADR-0018). An
+ *  infrastructure FACT, not an application preference: both wire endpoints
+ *  ship in this package and the only supported infra fixes the number, so it
+ *  is a constant, not a knob — a knob could only lower it pointlessly or
+ *  raise it into the edge cap's lie. If Cloudflare changes the cap, this
+ *  constant changes with an ADR note. Mirrors the server's ADR-0012 default. */
+const MAX_FRAME_BYTES = 1_048_576
+
 export class MutationRejectedError extends Error {
   constructor(
     message: string,
@@ -74,13 +82,6 @@ export interface TransportOptions {
   codec?: FrameCodec
   /** Confirmation/await timeout in ms. */
   timeoutMs?: number
-  /** Maximum encoded size (bytes) of an outgoing mut/call frame (ADR-0018).
-   *  Cloudflare's edge caps INBOUND WebSocket messages at ~1 MiB, so an
-   *  oversize frame may never reach the DO at all — the pre-send guard rejects
-   *  it locally with a typed `MutationRejectedError` (code "FRAME_TOO_LARGE")
-   *  instead of letting the send die into a confirmation timeout. Default
-   *  1_048_576, aligned with the server's `maxFrameBytes` and the edge cap. */
-  maxFrameBytes?: number
   /** Reconnect pacing. A number is the base delay (ms) for the default
    *  jittered-backoff policy (`defaultReconnectDelay`) — the attempt-1 jitter
    *  ceiling. A function is the full policy; return `null` to stop
@@ -135,7 +136,6 @@ export class WebSocketTransport<Api = unknown> {
   private connectPromise: Promise<void> | null = null
   private readonly codec: FrameCodec
   private readonly timeoutMs: number
-  private readonly maxFrameBytes: number
   private readonly open: () => WebSocketLike | Promise<WebSocketLike>
 
   private readonly handlers = new Map<
@@ -174,7 +174,6 @@ export class WebSocketTransport<Api = unknown> {
   constructor(opts: TransportOptions) {
     this.codec = opts.codec ?? createFrameCodec()
     this.timeoutMs = opts.timeoutMs ?? 5000
-    this.maxFrameBytes = opts.maxFrameBytes ?? 1_048_576
     this.reconnectDelay =
       typeof opts.reconnectDelay === "function" ? opts.reconnectDelay : defaultReconnectDelay(opts.reconnectDelay ?? 250)
     this.onClosed = opts.onClosed
@@ -425,9 +424,9 @@ export class WebSocketTransport<Api = unknown> {
     // measure bytes, not UTF-16 code units, or non-ASCII payloads undercount
     // and slip past the guard only to die at the edge cap (codex review).
     const bytes = typeof encoded === "string" ? new TextEncoder().encode(encoded).byteLength : encoded.byteLength
-    if (bytes > this.maxFrameBytes) {
+    if (bytes > MAX_FRAME_BYTES) {
       throw new MutationRejectedError(
-        `frame too large (${bytes} bytes > maxFrameBytes ${this.maxFrameBytes})`,
+        `frame too large (${bytes} bytes > the ${MAX_FRAME_BYTES}-byte inbound WebSocket edge cap)`,
         "FRAME_TOO_LARGE",
       )
     }

@@ -7,8 +7,10 @@
 // timeout. Outbound (server->client) is NOT capped the same way: a large row
 // must still arrive whole (no splitting, no dropping — column projection, #28a,
 // is the real fix), with a console.warn as observability when a frame exceeds
-// `warnOutboundFrameBytes`. These tests pin all three surfaces, plus the
-// adjacent read-only-op rejection and tiny-collection snapshots.
+// the fixed 1 MiB threshold. The limits are infrastructure facts (Cloudflare's
+// edge cap), not application preferences — constants, not knobs. These tests
+// pin all three surfaces, plus the adjacent read-only-op rejection and
+// tiny-collection snapshots.
 
 import { createCollection } from "@tanstack/db";
 import { env, runInDurableObject, SELF } from "cloudflare:test";
@@ -123,7 +125,7 @@ describe("large TEXT values sync server->client whole", () => {
     t.close();
   });
 
-  it("warns (console.warn) when an outbound frame exceeds warnOutboundFrameBytes; small frames stay silent", async () => {
+  it("warns (console.warn) when an outbound frame exceeds the fixed 1 MiB threshold; small frames stay silent", async () => {
     const room = "fl-warn-outbound";
     const warn = vi.spyOn(console, "warn");
     try {
@@ -151,7 +153,7 @@ describe("large TEXT values sync server->client whole", () => {
       expect(messages.get("small")).toBeDefined();
       expect(
         warn.mock.calls.filter((c) =>
-          String(c[0]).includes("warnOutboundFrameBytes"),
+          String(c[0]).includes("oversize outbound"),
         ),
       ).toHaveLength(0);
 
@@ -180,11 +182,13 @@ describe("large TEXT values sync server->client whole", () => {
         await new Promise((r) => setTimeout(r, 10));
       }
       const warned = warn.mock.calls.filter((c) =>
-        String(c[0]).includes("warnOutboundFrameBytes"),
+        String(c[0]).includes("oversize outbound"),
       );
       expect(warned.length).toBeGreaterThan(0);
-      // The warning names the collection (or sub) so the operator can act on it.
+      // The warning names the collection (or sub) so the operator can act on
+      // it, and points at the real fix (column projection, issue #28).
       expect(String(warned[0]![0])).toMatch(/messages/);
+      expect(String(warned[0]![0])).toMatch(/column projection/);
       t.close();
     } finally {
       warn.mockRestore();
@@ -291,12 +295,12 @@ describe("oversize client mutation frames (ADR-0018)", () => {
       url: "https://example.com/unused",
       open: () => fake,
       codec: createFrameCodec({ binary: false }),
-      maxFrameBytes: 4096,
       timeoutMs: 500,
     });
     await t.connect();
-    // "€" is 1 UTF-16 code unit but 3 UTF-8 bytes: 2000 of them keep the
-    // frame's code-unit length under 4096 while its byte size is ~6000+.
+    // "€" is 1 UTF-16 code unit but 3 UTF-8 bytes: 400k of them keep the
+    // frame's code-unit length (~400k) under the 1 MiB cap while its byte
+    // size (~1.2M) is over it.
     let err: unknown;
     try {
       await t.sendMut({
@@ -304,7 +308,11 @@ describe("oversize client mutation frames (ADR-0018)", () => {
         txId: "fl-utf8-tx",
         collection: "messages",
         ops: [
-          { type: "insert", key: "u", cols: { id: "u", body: "€".repeat(2000) } },
+          {
+            type: "insert",
+            key: "u",
+            cols: { id: "u", body: "€".repeat(400_000) },
+          },
         ],
       });
     } catch (e) {
@@ -314,6 +322,43 @@ describe("oversize client mutation frames (ADR-0018)", () => {
     // with a generic Error instead.
     expect(err).toBeInstanceOf(MutationRejectedError);
     expect((err as MutationRejectedError).code).toBe("FRAME_TOO_LARGE");
+    t.close();
+  });
+
+  it("surfaces a synchronous send() failure immediately with a clean waiter — never a confirmation timeout", async () => {
+    // workerd refuses some sends synchronously (e.g. frames over its own cap).
+    // The transport must reject with THAT error right away and clean up the
+    // pending-receipt waiter/timer (codex review) — not sit on an armed
+    // timeout and report a generic "confirmation timeout" later.
+    const boom = new Error("socket refused the send");
+    const fake: WebSocketLike = {
+      send: () => {
+        throw boom;
+      },
+      close: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    const t = new WebSocketTransport({
+      url: "https://example.com/unused",
+      open: () => fake,
+      timeoutMs: 500,
+    });
+    await t.connect();
+    const start = Date.now();
+    let err: unknown;
+    try {
+      await t.sendMut({
+        t: "mut",
+        txId: "fl-syncfail-tx",
+        collection: "messages",
+        ops: [{ type: "insert", key: "k", cols: { id: "k", body: "small" } }],
+      });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBe(boom);
+    expect(Date.now() - start).toBeLessThan(400);
     t.close();
   });
 });

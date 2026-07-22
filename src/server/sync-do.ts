@@ -40,7 +40,6 @@ export abstract class SyncDurableObject<Env = unknown, TUser = unknown> extends 
   declare protected readonly maxOpsPerMutation: number
   declare protected readonly maxSubsPerSocket: number
   declare protected readonly maxFrameBytes: number
-  declare protected readonly warnOutboundFrameBytes: number | null
 
   constructor(ctx: ConstructorParameters<typeof DurableObject>[0], env: Env) {
     super(ctx, env)

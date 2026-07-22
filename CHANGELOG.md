@@ -17,14 +17,14 @@ While pre-1.0, the public API may change between 0.x releases.
   timeout — and in production Cloudflare's ~1 MiB edge cap on inbound
   WebSocket messages means the frame may never reach the DO at all. The
   transport now guards **before sending**: a `mut`/`call` whose encoded size
-  exceeds the new `maxFrameBytes` option (default 1 MiB, aligned with the
-  server and the edge cap) rejects immediately with `MutationRejectedError`
-  (code `"FRAME_TOO_LARGE"`), so the optimistic overlay rolls back promptly.
-  The server's silent drop stays as defense in depth. Outbound gains a
-  warn-only threshold, `warnOutboundFrameBytes` (default 1 MiB, `null`
-  disables): a larger encoded frame logs a `console.warn` with size and
-  collection but is still sent whole — column projection (#28a) remains the
-  real fix for oversized full-row re-sends.
+  exceeds the 1 MiB edge cap rejects immediately with
+  `MutationRejectedError` (code `"FRAME_TOO_LARGE"`), so the optimistic
+  overlay rolls back promptly. The server's silent drop stays as defense in
+  depth. Outbound gains a warn-only fixed 1 MiB threshold: a larger encoded
+  frame logs a `console.warn` with size and collection but is still sent
+  whole — column projection (#28a) remains the real fix for oversized
+  full-row re-sends. The limits are infrastructure facts (Cloudflare's edge
+  cap), not application preferences, so they are constants, not options.
 
 - **Transport reconnect policy (ADR-0016; fixes #25, #26).** One option,
   `reconnectDelay?: number | ((attempt, closeCode?, closeReason?) => number | null)`
