@@ -1,7 +1,11 @@
+import { createCollection } from "@tanstack/db"
 import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
+import { doCollectionOptions } from "../src/client/do-collection.ts"
+import { WebSocketTransport, type WebSocketLike } from "../src/client/transport.ts"
 import { createFrameCodec } from "../src/wire/frame-codec.ts"
 import type { ClientFrame, ServerFrame } from "../src/wire/frames.ts"
+import type { TestApi } from "./test-worker.ts"
 
 // WHY: these tests pin three load-bearing invariants in the server's error paths:
 //   1. Atomicity — a failed mutation leaves no partial state; nothing is applied
@@ -201,6 +205,77 @@ describe("mutation error paths (atomicity, fail-loud, exactly-once)", () => {
     expect(r2.error.code).toBe("VALIDATION")
     expect(r2.error.message).toBe(r1.error.message)
     ws.close()
+  })
+})
+
+describe("no mutation handler, at client altitude", () => {
+  // WHY: the wire-level sibling above ("unknown mutation collection →
+  // rejected") pins that the server answers /no mutation handler/ with a
+  // `rejected` frame. This pins the CLIENT altitude of the SAME server path:
+  // the rejection surfaces through a real @tanstack/db collection as a
+  // MutationRejectedError and the optimistic overlay rolls back promptly —
+  // a regression in either half (transport rejection plumbing, TanStack
+  // rollback wiring) ships silently past the wire-level pin alone.
+  //
+  // `transformed` declares ONLY an insert mutation — update/delete are the
+  // "no mutations block" case per-op. A collection with NO mutations at all
+  // takes the identical code path (mutations.get returns undefined).
+  it("client update on an op with no handler: MutationRejectedError + optimistic rollback", async () => {
+    const room = "fl-readonly"
+    const t = new WebSocketTransport<TestApi>({
+      url: `https://example.com/sync/${room}`,
+      open: async () => {
+        const res = await SELF.fetch(`https://example.com/sync/${room}`, { headers: { Upgrade: "websocket" } })
+        const ws = res.webSocket
+        if (!ws) throw new Error("no webSocket")
+        ws.accept()
+        return ws as unknown as WebSocketLike
+      },
+    })
+    await t.connect()
+
+    const coll = createCollection(
+      doCollectionOptions({
+        transport: t,
+        table: "transformed",
+        getKey: (r) => r.id,
+      }),
+    )
+    await coll.preload()
+
+    // Seed via the existing insert mutation (allowed).
+    await coll.insert({ id: "r1", body: "orig" }).isPersisted.promise
+    expect(coll.get("r1")).toMatchObject({ body: "orig" })
+
+    // update has NO handler on `transformed`.
+    const tx = coll.update("r1", (d) => {
+      d.body = "hacked"
+    })
+    // Optimistic overlay applies immediately...
+    expect(coll.get("r1")).toMatchObject({ body: "hacked" })
+
+    let err: unknown
+    try {
+      await tx.isPersisted.promise
+    } catch (e) {
+      err = e
+    }
+    expect(err).toBeDefined()
+    // TanStack may wrap the mutationFn error; the root cause is the transport's
+    // MutationRejectedError carrying the server's message.
+    const msg =
+      err instanceof Error ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}` : String(err)
+    expect(msg).toMatch(/no mutation handler for 'transformed:update'/)
+
+    // Optimistic overlay rolled back to the confirmed row.
+    expect(coll.get("r1")).toMatchObject({ body: "orig" })
+
+    // Server row untouched.
+    const rows = await runInDurableObject(env.SYNC_DO.get(env.SYNC_DO.idFromName(room)), (_i, s) =>
+      Array.from(s.storage.sql.exec("SELECT body FROM transformed WHERE id='r1'")),
+    )
+    expect((rows[0] as { body: string }).body).toBe("orig")
+    t.close()
   })
 })
 

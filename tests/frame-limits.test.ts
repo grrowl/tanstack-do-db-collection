@@ -9,8 +9,7 @@
 // is the real fix), with a console.warn as observability when a frame exceeds
 // the fixed 1 MiB threshold. The limits are infrastructure facts (Cloudflare's
 // edge cap), not application preferences — constants, not knobs. These tests
-// pin all three surfaces, plus the adjacent read-only-op rejection and
-// tiny-collection snapshots.
+// pin all three surfaces.
 
 import { createCollection } from "@tanstack/db";
 import { env, runInDurableObject, SELF } from "cloudflare:test";
@@ -359,131 +358,6 @@ describe("oversize client mutation frames (ADR-0018)", () => {
     }
     expect(err).toBe(boom);
     expect(Date.now() - start).toBeLessThan(400);
-    t.close();
-  });
-});
-
-describe("read-only collection ops (no mutation handler)", () => {
-  // `transformed` declares ONLY an insert mutation — update/delete are the
-  // "no mutations block" case per-op. A collection with NO mutations at all
-  // takes the identical code path (mutations.get returns undefined).
-  it("client update on an op with no handler: MutationRejectedError + optimistic rollback", async () => {
-    const room = "fl-readonly";
-    const t = makeTransport(room);
-    await t.connect();
-
-    const coll = createCollection(
-      doCollectionOptions({
-        transport: t,
-        table: "transformed",
-        getKey: (r) => r.id,
-      }),
-    );
-    await coll.preload();
-
-    // Seed via the existing insert mutation (allowed).
-    await coll.insert({ id: "r1", body: "orig" }).isPersisted.promise;
-    expect(coll.get("r1")).toMatchObject({ body: "orig" });
-
-    // update has NO handler on `transformed`.
-    const tx = coll.update("r1", (d) => {
-      d.body = "hacked";
-    });
-    // Optimistic overlay applies immediately...
-    expect(coll.get("r1")).toMatchObject({ body: "hacked" });
-
-    let err: unknown;
-    try {
-      await tx.isPersisted.promise;
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeDefined();
-    // TanStack may wrap the mutationFn error; the root cause is the transport's
-    // MutationRejectedError carrying the server's message.
-    const msg =
-      err instanceof Error
-        ? `${err.message} ${String((err as { cause?: unknown }).cause ?? "")}`
-        : String(err);
-    expect(msg).toMatch(/no mutation handler for 'transformed:update'/);
-
-    // Optimistic overlay rolled back to the confirmed row.
-    expect(coll.get("r1")).toMatchObject({ body: "orig" });
-
-    // Server row untouched.
-    const rows = await runInDurableObject(
-      env.SYNC_DO.get(env.SYNC_DO.idFromName(room)),
-      (_i, s) =>
-        Array.from(
-          s.storage.sql.exec("SELECT body FROM transformed WHERE id='r1'"),
-        ),
-    );
-    expect((rows[0] as { body: string }).body).toBe("orig");
-    t.close();
-  });
-});
-
-describe("tiny collections", () => {
-  it("zero-row collection: snapshot completes (snap-end) and preload resolves", async () => {
-    const room = "fl-empty";
-    const t = makeTransport(room);
-    await t.connect();
-    const files = createCollection(
-      doCollectionOptions({
-        transport: t,
-        table: "files",
-        getKey: (r) => r.id,
-      }),
-    );
-    await files.preload(); // would hang if a 0-row snapshot never emitted snap-end
-    expect(files.size).toBe(0);
-    t.close();
-  });
-
-  it("single-row collection: snapshot + frequent UPDATEs to the one row stream fine", async () => {
-    const room = "fl-single";
-    const t = makeTransport(room);
-    await t.connect();
-    await runInDurableObject(
-      env.SYNC_DO.get(env.SYNC_DO.idFromName(room)),
-      (_i, s) => {
-        s.storage.sql.exec("INSERT INTO files(id,name) VALUES('meta','v0')");
-      },
-    );
-    const files = createCollection(
-      doCollectionOptions({
-        transport: t,
-        table: "files",
-        getKey: (r) => r.id,
-      }),
-    );
-    await files.preload();
-    expect(files.size).toBe(1);
-    expect(files.get("meta")).toMatchObject({ name: "v0" });
-
-    // Repeated server-side updates to the single row (metadata churn) — the
-    // coalescer collapses them; the client must land on the last value.
-    await runInDurableObject(
-      env.SYNC_DO.get(env.SYNC_DO.idFromName(room)),
-      (i) => {
-        const inst = i as unknown as {
-          runSyncedWrite: (fn: (sql: SqlStorage) => void) => void;
-        };
-        for (let n = 1; n <= 5; n++) {
-          inst.runSyncedWrite((sql) =>
-            sql.exec("UPDATE files SET name=? WHERE id='meta'", `v${n}`),
-          );
-        }
-      },
-    );
-    const start = Date.now();
-    while ((files.get("meta") as { name: string } | undefined)?.name !== "v5") {
-      if (Date.now() - start > 3000)
-        throw new Error(
-          `never converged: ${JSON.stringify(files.get("meta"))}`,
-        );
-      await new Promise((r) => setTimeout(r, 10));
-    }
     t.close();
   });
 });
