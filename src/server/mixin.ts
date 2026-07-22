@@ -143,6 +143,13 @@ export function Syncable<Env = unknown, TUser = unknown>() {
       protected readonly maxSubsPerSocket: number = 256
       /** Maximum inbound frame size in bytes (ADR-0012). */
       protected readonly maxFrameBytes: number = 1_048_576
+      /** Outbound frame-size warning threshold in bytes (ADR-0018).
+       *  Observability, not enforcement: outbound WS messages are not
+       *  edge-capped the way inbound ones are, and splitting or dropping a
+       *  hydrated full-row frame would be worse than delivering it — the real
+       *  fix for oversized re-sends is column projection (issue #28a). `null`
+       *  disables the warning. Default 1 MiB (mirrors `maxFrameBytes`). */
+      protected readonly warnOutboundFrameBytes: number | null = 1_048_576
 
       // ---- internal machinery (private — off the collision surface) ----------
       #compiled: CompiledSync<TUser, Env> | undefined
@@ -325,6 +332,14 @@ export function Syncable<Env = unknown, TUser = unknown>() {
 
         // Reject oversize frames before decode (ADR-0012): mirrors the
         // undecodable-frame stance — drop + log, no reply, no crash.
+        //
+        // No typed `rejected` here (ADR-0018): recovering the txId would mean
+        // decoding the very payload this guard exists NOT to decode (the bound
+        // is on memory/CPU, per ADR-0012). In production Cloudflare's edge caps
+        // inbound WS messages at ~1 MiB anyway, so an oversize frame usually
+        // never reaches this handler at all — the client transport's pre-send
+        // guard (same limit, MutationRejectedError "FRAME_TOO_LARGE") is the
+        // reliable rejection surface; this drop is defense in depth.
         const byteLen = typeof message === "string" ? message.length : message.byteLength
         if (byteLen > this.maxFrameBytes) {
           console.error(`oversize frame dropped (${byteLen} bytes > maxFrameBytes ${this.maxFrameBytes})`)
@@ -868,9 +883,26 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         this.#send(ws, { t: "uptodate", seq })
       }
 
-      /** Encode and send a server frame on one socket. */
+      /** Encode and send a server frame on one socket. Warns — and still sends
+       *  whole — when the encoded frame exceeds `warnOutboundFrameBytes`
+       *  (ADR-0018): observability for hydrated full-row re-sends, whose real
+       *  fix is column projection (issue #28a). */
       #send(ws: WebSocket, frame: ServerFrame): void {
-        ws.send(this.#codec.encode(frame))
+        const encoded = this.#codec.encode(frame)
+        if (this.warnOutboundFrameBytes !== null) {
+          const bytes = typeof encoded === "string" ? encoded.length : encoded.byteLength
+          if (bytes > this.warnOutboundFrameBytes) {
+            // Resolve the sub's collection only on the warn path (linear scan
+            // over this socket's subs — never on the hot path).
+            const subId = (frame as { sub?: string }).sub
+            const collection = subId ? this.#subs.forWs(ws).find((s) => s.subId === subId)?.collection : undefined
+            const where = collection ? ` for collection '${collection}'` : subId ? ` for sub '${subId}'` : ""
+            console.warn(
+              `outbound '${frame.t}' frame is ${bytes} bytes (> warnOutboundFrameBytes ${this.warnOutboundFrameBytes})${where}`,
+            )
+          }
+        }
+        ws.send(encoded)
       }
 
       /** The attachment bound at upgrade, surviving hibernation. */

@@ -8,7 +8,23 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
-### Changed
+### Added
+
+- **Typed oversize-frame handling (ADR-0018; part of
+  [#28](https://github.com/grrowl/tanstack-durable-object-sync/issues/28)).**
+  An oversize client mutation used to be dropped silently server-side
+  (ADR-0012's `maxFrameBytes` guard), surfacing only as a confirmation
+  timeout — and in production Cloudflare's ~1 MiB edge cap on inbound
+  WebSocket messages means the frame may never reach the DO at all. The
+  transport now guards **before sending**: a `mut`/`call` whose encoded size
+  exceeds the new `maxFrameBytes` option (default 1 MiB, aligned with the
+  server and the edge cap) rejects immediately with `MutationRejectedError`
+  (code `"FRAME_TOO_LARGE"`), so the optimistic overlay rolls back promptly.
+  The server's silent drop stays as defense in depth. Outbound gains a
+  warn-only threshold, `warnOutboundFrameBytes` (default 1 MiB, `null`
+  disables): a larger encoded frame logs a `console.warn` with size and
+  collection but is still sent whole — column projection (#28a) remains the
+  real fix for oversized full-row re-sends.
 
 - **Transport reconnect policy (ADR-0016; fixes #25, #26).** One option,
   `reconnectDelay?: number | ((attempt, closeCode?, closeReason?) => number | null)`
