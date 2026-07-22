@@ -190,6 +190,10 @@ export class WebSocketTransport<Api = unknown> {
       }
       ws.addEventListener("message", (ev) => this.onMessage(ev.data))
       ws.addEventListener("close", (ev) => {
+        // Only the CURRENT socket's close may detach/reconnect. A stale
+        // socket's late close (delivered after close()+connect() installed a
+        // fresh socket) must not null the live connection (codex review).
+        if (this.ws !== ws) return
         this.ws = null
         this.connectPromise = null
         // Auto-reconnect on an unexpected drop while subscriptions are active.

@@ -310,4 +310,32 @@ describe("reconnect attempt counter (drives the backoff)", () => {
     await new Promise((r) => setTimeout(r, 100))
     expect(opens).toBe(1) // an intentional close() leaves nothing running
   })
+
+  it("a stale socket's late close event cannot detach the live socket", async () => {
+    // close() then an immediate connect(): the OLD socket's close event can be
+    // delivered after the new socket is installed. It must be ignored —
+    // otherwise it nulls the live connection and the next demand-driven
+    // connect() opens a needless third socket.
+    const fakes: Array<Fake> = []
+    let opens = 0
+    const t = new WebSocketTransport({
+      url: "wss://fake-stale-close",
+      reconnectDelay: () => 1,
+      open: async () => {
+        opens++
+        const f = makeFake()
+        fakes.push(f)
+        return f.ws
+      },
+    })
+    await t.subscribe("s1", "messages", noopHandler())
+    t.close() // old socket told to close; its event is not delivered yet
+    await t.connect() // fresh socket on the same instance
+    expect(opens).toBe(2)
+
+    fakes[0]!.emit("close", { code: 1005 }) // the old socket's close finally lands
+    await t.connect() // must be a no-op: the live socket is still attached
+    expect(opens).toBe(2)
+    t.close()
+  })
 })
