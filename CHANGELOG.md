@@ -8,6 +8,8 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-07-27
+
 ### Added
 
 - **Typed oversize-frame handling (ADR-0018; part of
