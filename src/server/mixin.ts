@@ -40,12 +40,27 @@ import { Broadcaster } from "./broadcast.ts"
 import { decodeResult, encodeResult, lookupTx, recordTx, type SeenTx, sweepDedup } from "./dedup.ts"
 import { compileSchema, type CompiledSync, type SyncSchema, ValidationError } from "./registry.ts"
 import { andPredicates, compileSubsetQuery, UnsupportedPredicateError } from "./sql-compiler.ts"
-import { SubscriptionRegistry, type Sub } from "./subscriptions.ts"
+import {
+  deletePersistedSocketSubs,
+  deletePersistedSub,
+  loadPersistedSubs,
+  persistSub,
+  SubscriptionRegistry,
+  type Sub,
+  sweepOrphanSubs,
+} from "./subscriptions.ts"
 
 /** Reserved hibernation tag stamped on every sync socket. The wake-time restore
  *  (`getWebSockets(SYNC_TAG)`) and every handler's socket-ownership check key off
  *  this tag, so tddc never touches a host's sockets and vice versa (ADR-0015). */
 export const SYNC_TAG = "_tddc"
+
+/** Second tag stamped at accept: a per-socket id that survives hibernation and
+ *  keys this socket's durable `_sync_subs` rows, so a wake can re-associate
+ *  subscriptions with the surviving socket (ADR-0019). Tags — not the
+ *  attachment, which is contractually the author's claims (ADR-0001 D13,
+ *  ADR-0015) and capped at 2 KiB. Budget: 2 of Cloudflare's 10 tags/socket. */
+const SOCKET_ID_TAG_PREFIX = "_tddc.sid:"
 
 /** Outbound frame-size warning threshold (ADR-0018): observability only, and
  *  deliberately NOT a knob. Inbound is enforced at the edge-cap constant;
@@ -254,6 +269,68 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         initSchema(this.#sql)
         ensureTriggers(this.#sql, compiled.collections.values())
         this.#compiled = compiled
+        this.#restoreSubs()
+        this.#reconcileSubs()
+      }
+
+      /** Re-associate durable `_sync_subs` rows with the sockets that survived
+       *  a hibernation wake (ADR-0019). Runs inside `registerSync` — the
+       *  author's documented constructor obligation — so the registry is whole
+       *  before any frame dispatch or drain can consult it (the guarantee is
+       *  conditional on that obligation; a frame arriving before registration
+       *  fails loud at `#registry`). Idempotent (a second registerSync re-adds
+       *  the same entries; `add` replaces).
+       *
+       *  A row whose predicate no longer compiles (a version change narrowed
+       *  the evaluator floor) closes the SOCKET with a non-terminal code
+       *  instead of sending `reset`: the client's `onReset` truncates but does
+       *  not re-subscribe (a reset would strand the query dead while its
+       *  cursor advances — codex review), whereas a close engages the
+       *  reconnect machinery, which re-subscribes everything recoverable and
+       *  routes the bad predicate through `#handleSub`'s pre-existing,
+       *  app-visible rejection. */
+      #restoreSubs(): void {
+        for (const ws of this.#liveWs) {
+          const sid = this.#socketIdFor(ws)
+          if (!sid) continue // legacy pre-0.6 socket: nothing was persisted
+          for (const row of loadPersistedSubs(this.#sql, sid)) {
+            try {
+              this.#subs.add(ws, row.subId, row.collection, row.where)
+            } catch (e) {
+              if (e instanceof UnsupportedPredicateError) {
+                console.error(
+                  `restored sub '${row.subId}' on '${row.collection}' no longer compiles (${e.message}); ` +
+                    `closing socket for clean re-subscribe`,
+                )
+                this.#dropSocketSubs(ws) // durable rows too — the retry must re-derive from the client
+                this.#liveWs.delete(ws)
+                ws.close(1011, "sync restore failed; resubscribe")
+                break // remaining rows for this socket are moot
+              }
+              throw e
+            }
+          }
+        }
+      }
+
+      /** Drop subscriptions whose collection is not in the compiled schema —
+       *  in memory AND durably, with a `reset` so the client truncates
+       *  (correct terminal state: the collection is gone, there is nothing to
+       *  re-subscribe to). Covers a wake restoring rows from an older schema
+       *  AND a mid-life re-registration that removed a collection; without
+       *  this, such subs sit in the registry as zombies no drain will ever
+       *  service (codex review). */
+      #reconcileSubs(): void {
+        for (const ws of this.#liveWs) {
+          const sid = this.#socketIdFor(ws)
+          for (const sub of this.#subs.forWs(ws)) {
+            if (this.#registry.collections.has(sub.collection)) continue
+            console.error(`sub '${sub.subId}' dropped: collection '${sub.collection}' is not registered`)
+            this.#subs.remove(ws, sub.subId)
+            if (sid) deletePersistedSub(this.#sql, sid, sub.subId)
+            this.#send(ws, { t: "reset", sub: sub.subId })
+          }
+        }
       }
 
       // ---- runtime-dispatched overrides --------------------------------------
@@ -307,7 +384,9 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         server.serializeAttachment(attachment)
         // Tagged accept (SYNC_TAG) + plain attachment (no `__pk`): the two
         // independent discriminators that keep host and sync sockets apart.
-        this.ctx.acceptWebSocket(server, [SYNC_TAG])
+        // The second tag is this socket's durable id (ADR-0019): tags survive
+        // hibernation, so a wake can find the socket's `_sync_subs` rows.
+        this.ctx.acceptWebSocket(server, [SYNC_TAG, SOCKET_ID_TAG_PREFIX + crypto.randomUUID()])
         this.#liveWs.add(server)
 
         return new Response(null, { status: 101, webSocket: client })
@@ -319,6 +398,18 @@ export function Syncable<Env = unknown, TUser = unknown>() {
        *  other base, only SYNC_TAG sockets are ours; the rest delegate to `super`. */
       #isSyncSocket(ws: WebSocket): boolean {
         return this.#isBareDO || this.ctx.getTags(ws).includes(SYNC_TAG)
+      }
+
+      /** The socket's durable id (ADR-0019), read back from its accept-time
+       *  tag. Undefined for a legacy socket accepted by a pre-0.6 build that
+       *  survived an in-place upgrade wake — such a socket's subscriptions
+       *  were never persisted, so it degrades to pre-fix behavior (dead until
+       *  reconnect) rather than failing. */
+      #socketIdFor(ws: WebSocket): string | undefined {
+        for (const tag of this.ctx.getTags(ws)) {
+          if (tag.startsWith(SOCKET_ID_TAG_PREFIX)) return tag.slice(SOCKET_ID_TAG_PREFIX.length)
+        }
+        return undefined
       }
 
       override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -382,7 +473,7 @@ export function Syncable<Env = unknown, TUser = unknown>() {
           if (base) base.call(this, ws, code ?? 1000, reason ?? "", wasClean ?? false)
           return
         }
-        this.#subs.removeAll(ws)
+        this.#dropSocketSubs(ws)
         this.#liveWs.delete(ws)
       }
 
@@ -392,8 +483,20 @@ export function Syncable<Env = unknown, TUser = unknown>() {
           if (base) base.call(this, ws, error)
           return
         }
-        this.#subs.removeAll(ws)
+        this.#dropSocketSubs(ws)
         this.#liveWs.delete(ws)
+      }
+
+      /** Drop a closed/errored socket's subscriptions, in memory AND durably
+       *  (ADR-0019). The `#compiled` guard covers a DO that never called
+       *  `registerSync` (no `initSchema`, no `_sync_subs`): it can have had no
+       *  subscriptions, so there is nothing durable to delete. */
+      #dropSocketSubs(ws: WebSocket): void {
+        this.#subs.removeAll(ws)
+        if (this.#compiled) {
+          const sid = this.#socketIdFor(ws)
+          if (sid) deletePersistedSocketSubs(this.#sql, sid)
+        }
       }
 
       /** Shape-guard: returns true iff `v` is a structurally valid ClientFrame.
@@ -452,9 +555,14 @@ export function Syncable<Env = unknown, TUser = unknown>() {
         switch (frame.t) {
           case "sub":
             return this.#handleSub(ws, frame)
-          case "unsub":
+          case "unsub": {
             this.#subs.remove(ws, frame.subId)
+            if (this.#compiled) {
+              const sid = this.#socketIdFor(ws)
+              if (sid) deletePersistedSub(this.#sql, sid, frame.subId)
+            }
             return
+          }
           case "mut":
             return this.#handleMut(ws, frame)
           case "call":
@@ -768,6 +876,16 @@ export function Syncable<Env = unknown, TUser = unknown>() {
             compactChanges(this.#sql)
             pruneChanges(this.#sql, this.changelogRetentionMs, Date.now())
             sweepDedup(this.#sql, this.dedupRetentionMs, Date.now())
+            // Orphaned subscription rows (socket died without webSocketClose —
+            // hard termination): hygiene rides compaction, nothing polls
+            // (ADR-0019 D4). Every id-tagged socket carries SYNC_TAG, so the
+            // tagged query is the complete live set.
+            const liveIds = new Set<string>()
+            for (const ws of this.ctx.getWebSockets(SYNC_TAG)) {
+              const sid = this.#socketIdFor(ws)
+              if (sid) liveIds.add(sid)
+            }
+            sweepOrphanSubs(this.#sql, liveIds)
           })(),
         )
       }
@@ -834,6 +952,13 @@ export function Syncable<Env = unknown, TUser = unknown>() {
             return
           }
           throw e
+        }
+        // Write through (ADR-0019): the accepted sub becomes durable, so a
+        // hibernation wake can restore it onto the surviving socket. Only
+        // after `add` succeeds — a rejected predicate must not persist.
+        {
+          const sid = this.#socketIdFor(ws)
+          if (sid) persistSub(this.#sql, sid, frame.subId, frame.collection, frame.where)
         }
         const seq = String(currentSeq(this.#sql))
 

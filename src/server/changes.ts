@@ -55,6 +55,17 @@ export function initSchema(sql: SqlStorage): void {
   if (!seenTxCols.some((c) => c.name === "error_code")) {
     sql.exec("ALTER TABLE _sync_seen_tx ADD COLUMN error_code TEXT")
   }
+  // Durable per-socket subscriptions (ADR-0019): hibernatable sockets survive
+  // eviction while the in-memory registry does not; these rows let the wake
+  // restore re-associate subscriptions with surviving sockets. SQL lives in
+  // subscriptions.ts.
+  sql.exec(`CREATE TABLE IF NOT EXISTS _sync_subs (
+              socket_id  TEXT NOT NULL,
+              sub_id     TEXT NOT NULL,
+              collection TEXT NOT NULL,
+              where_ir   TEXT,
+              PRIMARY KEY (socket_id, sub_id)
+            )`)
 }
 
 /**

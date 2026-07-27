@@ -1,12 +1,17 @@
-// In-memory subscription registry, keyed by WebSocket. Subscriptions live in
-// memory only — they are lost on hibernation and re-established by the client's
-// `resub` on reconnect (M7).
+// Subscription registry: an in-memory index keyed by WebSocket, backed by
+// durable per-socket rows in `_sync_subs` (ADR-0019). Hibernatable sockets
+// survive eviction while instance memory does not, so the mixin writes through
+// (sub/unsub/close) and restores this index from SQLite on every construction
+// — a wake with surviving sockets keeps its live queries. An actual reconnect
+// (socket close) still recovers via the client's `sub`+`since` path (M7).
 //
 // A subscription carries an optional `where` predicate IR (M5). It is compiled
 // with @tanstack/db's own evaluator so server-side filtering matches the
 // client's operator semantics exactly (no second predicate implementation).
 
 import { compileSingleRowExpression, toBooleanPredicate } from "@tanstack/db"
+import type { SqlStorage } from "@cloudflare/workers-types"
+import { decode as decodeValue, encode as encodeValue } from "../wire/codec.ts"
 import { UnsupportedPredicateError } from "./sql-compiler.ts"
 
 export interface Sub {
@@ -104,4 +109,64 @@ export class SubscriptionRegistry {
     }
     return out
   }
+}
+
+// ---- durable persistence for the registry (`_sync_subs`, ADR-0019) ---------
+// Table-scoped SQL, dedup.ts-style. The table is created in
+// changes.ts#initSchema. `where` IR is stored with the wire value codec (as
+// dedup does for command results): predicate literals may carry tagged values
+// (dates, bytes) that JSON.stringify would corrupt.
+
+/** A persisted subscription row, decoded. `where` is the wire-shaped IR. */
+export interface PersistedSub {
+  subId: string
+  collection: string
+  where: unknown
+}
+
+/** Upsert one subscription row. A re-sub on an existing subId replaces (the
+ *  same semantics as SubscriptionRegistry.add / ADR-0012's cap accounting). */
+export function persistSub(sql: SqlStorage, socketId: string, subId: string, collection: string, where: unknown): void {
+  sql.exec(
+    "INSERT OR REPLACE INTO _sync_subs(socket_id, sub_id, collection, where_ir) VALUES (?, ?, ?, ?)",
+    socketId,
+    subId,
+    collection,
+    where === undefined || where === null ? null : encodeValue(where),
+  )
+}
+
+export function deletePersistedSub(sql: SqlStorage, socketId: string, subId: string): void {
+  sql.exec("DELETE FROM _sync_subs WHERE socket_id = ? AND sub_id = ?", socketId, subId)
+}
+
+export function deletePersistedSocketSubs(sql: SqlStorage, socketId: string): void {
+  sql.exec("DELETE FROM _sync_subs WHERE socket_id = ?", socketId)
+}
+
+export function loadPersistedSubs(sql: SqlStorage, socketId: string): Array<PersistedSub> {
+  const rows = Array.from(
+    sql.exec<{ sub_id: string; collection: string; where_ir: string | null }>(
+      "SELECT sub_id, collection, where_ir FROM _sync_subs WHERE socket_id = ?",
+      socketId,
+    ),
+  )
+  return rows.map((r) => ({
+    subId: r.sub_id,
+    collection: r.collection,
+    where: r.where_ir === null ? undefined : decodeValue(r.where_ir),
+  }))
+}
+
+/** Drop rows for sockets that are no longer live — hygiene for sockets that
+ *  died without a webSocketClose (hard termination). Rides compaction
+ *  (ADR-0019 D4); nothing polls. An empty `liveSocketIds` clears the table. */
+export function sweepOrphanSubs(sql: SqlStorage, liveSocketIds: ReadonlySet<string>): void {
+  if (liveSocketIds.size === 0) {
+    sql.exec("DELETE FROM _sync_subs")
+    return
+  }
+  const ids = Array.from(liveSocketIds)
+  const placeholders = ids.map(() => "?").join(",")
+  sql.exec(`DELETE FROM _sync_subs WHERE socket_id NOT IN (${placeholders})`, ...ids)
 }

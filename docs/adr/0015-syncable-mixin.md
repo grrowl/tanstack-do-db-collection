@@ -223,3 +223,7 @@ tddc design gap; a PR against Actors is possible in principle but out of scope.
   (e.g. "sync and host sockets coexist"), not by a test that actually tears
   the instance down and reconstructs it. Upgrading `vitest`/`vitest-pool-workers`
   to unlock a real wake test is tracked as follow-up work, not bundled here.
+  *[Superseded: the vitest 4 migration (PR #34) lifted the toolchain blocker,
+  and ADR-0019's `tests/hibernation.test.ts` now exercises the restore under
+  real `evictDurableObject` cycles — which promptly exposed that the restore
+  was incomplete (sockets survived, subscriptions didn't). See ADR-0019.]*
