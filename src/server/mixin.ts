@@ -59,7 +59,7 @@ export const SYNC_TAG = "_tddc"
  *  keys this socket's durable `_sync_subs` rows, so a wake can re-associate
  *  subscriptions with the surviving socket (ADR-0019). Tags — not the
  *  attachment, which is contractually the author's claims (ADR-0001 D13,
- *  ADR-0015) and capped at 2 KiB. Budget: 2 of Cloudflare's 10 tags/socket. */
+ *  ADR-0015) and capped at 16 KiB. Budget: 2 of Cloudflare's 10 tags/socket. */
 const SOCKET_ID_TAG_PREFIX = "_tddc.sid:"
 
 /** Outbound frame-size warning threshold (ADR-0018): observability only, and

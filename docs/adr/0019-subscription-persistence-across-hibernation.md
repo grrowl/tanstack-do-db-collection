@@ -83,17 +83,44 @@ survives hibernation and stays out of the author's attachment; budget is
 comfortable (Cloudflare allows 10 tags × 256 bytes; this uses 2).
 
 **Rejected alternative — the socket attachment** (the pattern a downstream
-consumer uses for its own fixed-shape step subscriptions):
+consumer uses for its own fixed-shape step subscriptions; also Cloudflare's
+documented default for per-socket wake state). Steelmanned honestly (this
+section was corrected on the simplicity-adversary round):
 
-- The attachment is contractually the **author's** `TUser` claims (ADR-0001
-  D13; handlers read it raw via `deserializeAttachment`, and ADR-0015's second
-  discriminator — the `__pk` guard — inspects that exact shape). Wrapping it
-  in a library envelope changes a documented contract and breaks legacy
-  sockets that survive an in-place upgrade wake.
-- `serializeAttachment` caps at 2 KiB. `maxSubsPerSocket` is 256 (ADR-0012)
-  and predicate IR is unbounded: a subscription that is valid today would
-  start being rejected for persistence-bookkeeping reasons. Reject-don't-
-  degrade cuts both ways — bookkeeping must never be the thing that rejects.
+- Its genuine advantages, conceded: the attachment dies with the socket —
+  no id tag, no orphan rows, no sweep; and it is the platform primitive
+  built for exactly this.
+- **Contract stability is the decisive rejection.** The attachment is the
+  **author's** `TUser` claims (ADR-0001 D13; handlers read it raw via
+  `deserializeAttachment`, and ADR-0015's second discriminator — the `__pk`
+  guard — inspects that exact shape). A library envelope changes a documented
+  contract, needs shape-sniffing to coexist with pre-envelope sockets
+  surviving an upgrade wake, and every future reader inherits the ambiguity.
+- **No honest aggregate bound.** `serializeAttachment` caps at 16,384 bytes
+  (current Cloudflare docs; an earlier revision of this ADR said 2 KiB —
+  stale). Most small deployments would fit, but `maxSubsPerSocket` is 256
+  (ADR-0012) with unbounded predicate IR, so sufficiently complex apps hit a
+  cliff where sub #N is rejected *because of its siblings' sizes* — failure
+  dependent on unrelated state, for bookkeeping reasons. Reject-don't-
+  degrade cuts both ways. A size-triggered SQL fallback would be two
+  persistence designs instead of one. Re-serializing the whole set per
+  `sub`/`unsub` is also O(total state) write amplification.
+- Cloudflare's own guidance for state beyond the cap is "use the Storage API
+  and store the corresponding key as an attachment" — i.e. **this ADR's
+  architecture is the platform's documented escalation path**; the key rides
+  a tag instead of the attachment purely for the contract reason above.
+
+**Rejected alternative — close every sync socket on wake** (the null
+hypothesis; ~3 constructor lines would replace this entire ADR, with the
+battle-tested reconnect + `resubscribeAll` + `since` path doing all
+recovery, and the client staying sole owner of subscription truth):
+hibernation follows ~10 seconds of idleness (Cloudflare lifecycle docs), so
+this converts *ordinary application quiet* into reconnect waves — every wake
+closes every connected client, each reconnect re-upgrades, re-auths, re-subs
+and re-snapshots or catches up; a once-a-minute-burst workload would
+reconnect each client ~1,440×/day, and the hibernation API's entire purpose
+(cheap stable sockets across idle) is nullified by keeping sockets alive
+with auto-pong only to slam them shut on wake. Correct but regressive.
 
 ### D3: Restore point — inside `registerSync`, before anything can dispatch
 
@@ -141,7 +168,12 @@ frame asking surviving sockets to re-send `sub`s): requires a client upgrade
 in lockstep (violates D0); turns every wake into per-socket
 snapshot/catch-up round trips, which production eviction cadence would
 amplify; and grows the wire protocol to route around what is purely
-server-side bookkeeping.
+server-side bookkeeping. Recorded for the future, not planned: a
+capability-negotiated protocol resub could in principle retire `_sync_subs`
+once pre-protocol clients leave the support window (the simplicity round's
+strongest long-term candidate) — but even at that end state, per-wake round
+trips lose to a free local restore, so it is a machinery-deletion play, not
+a runtime win.
 
 ## Consequences
 
@@ -157,9 +189,13 @@ server-side bookkeeping.
   fixed build. A one-release sharp edge — documented, not worked around.
 - `sub`/`unsub` each cost one extra SQLite write (write-through), bracketed
   by the snapshot they already trigger. Negligible.
-- `_sync_subs` rows are socket ephemera, not data: close deletes them,
-  compaction sweeps orphans, and they are excluded from nothing else — no
-  retention policy applies.
+- `_sync_subs` rows are socket ephemera, not data: `unsub` and close delete
+  them, re-subs replace in place, and compaction sweeps orphans — so the
+  table holds exactly the live subscriptions of currently-open sockets, and
+  is empty when nobody is connected. **No TTL, deliberately**: the sweep is
+  liveness-keyed, not time-keyed — a TTL shorter than a long-idle-but-alive
+  socket would delete live subscriptions (re-creating this ADR's bug), and a
+  longer one is pointless.
 - `subscriptions.ts`'s header comment — the stale assumption itself — is
   rewritten to point here.
 - **Restored subs are grandfathered against a lowered `maxSubsPerSocket`**
