@@ -51,6 +51,31 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Fixed
 
+- **Subscriptions survive hibernation wake (ADR-0019; field report against
+  0.5.1).** Hibernatable sockets survive a DO eviction by design, but the
+  subscription registry was instance memory: a wake restored the socket set
+  and nothing else, so an idle client's live queries went silently dead on a
+  still-open socket — its own mutations still confirmed while deltas fanned
+  out to nobody, and the client's only re-subscribe trigger (the close path)
+  never fired. Subscriptions are now written through to a durable
+  `_sync_subs` table keyed by a per-socket id tag stamped at accept, and
+  restored onto surviving sockets during `registerSync` on every wake —
+  before anything can dispatch or drain. No wire or client change: an
+  unmodified 0.5.1 client against a fixed server recovers fully. Orphaned
+  rows (a socket that dies without `webSocketClose`) are swept during the
+  existing compaction housekeeping; no idle timers (ADR-0006 invariant
+  intact). Pinned by `tests/hibernation.test.ts` under **real evictions**
+  (`evictDurableObject`, unlocked by the vitest 4 migration — the
+  eviction-based wake test issue #29 asked for), in five shapes: eviction
+  after successful broadcasts, eviction before the first-ever broadcast,
+  eviction of a cohosted base (tagged-restore branch, host socket untouched),
+  a restored sub whose collection left the schema (reconciled: `reset` +
+  row dropped, healthy subs untouched), and a restored predicate that no
+  longer compiles (socket closed with a non-terminal code so reconnect
+  re-subscribes — a `reset` would strand the query, adversarial review).
+  Sockets accepted by a **pre-fix** build that survive an in-place upgrade
+  carry no id tag and keep the old behavior (dead until reconnect) — a
+  one-release sharp edge, documented in ADR-0019.
 - **Rejection `code` now survives tx-dedup replay (#21).** The dedup record
   persisted only the rejection message, so a client retrying the same `txId`
   got the reason with no machine-readable `code` — breaking code-based error

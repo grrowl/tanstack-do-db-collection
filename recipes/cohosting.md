@@ -76,13 +76,15 @@ Be clear-eyed about what backs the guarantee before you build on it.
   no socket entry points) were checked by reading partyserver 0.5.8, agents
   0.17.3, and think 0.12.1. A newer host version may behave differently; the
   filtering is an internal behavior of a pre-1.0 package.
-- **Not yet exercised end to end.** No test forces a real hibernation eviction,
-  so the wake-time restore is verified by code reading plus same-instance tag
-  assertions (the tooling to force an eviction lands in a newer
-  `vitest-pool-workers` than this repo pins; see ADR-0015). And CI never runs
-  the real `agents` package, only the fake. If you cohost with a real `Agent`
-  in production, you are ahead of our own test coverage; we would love to hear
-  how it goes.
+- **Wake restore exercised under real evictions** — `tests/hibernation.test.ts`
+  forces actual eviction-and-reconstruct cycles (`evictDurableObject`, unlocked
+  by the vitest 4 migration) and pins that subscriptions survive on surviving
+  sockets (ADR-0019; the first real eviction promptly exposed that they
+  hadn't been). The eviction tests run over the bare-DO base; the cohosted
+  bases are still covered by same-instance tag assertions only. And CI never
+  runs the real `agents` package, only the fake. If you cohost with a real
+  `Agent` in production, you are ahead of our own test coverage; we would love
+  to hear how it goes.
 
 ## Using `@cloudflare/actors`
 

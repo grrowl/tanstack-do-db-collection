@@ -117,4 +117,43 @@ describe("maybeCompact wiring: threshold gate + compaction + retention prune (co
     })
     ws.close()
   })
+
+  // ADR-0019 D4: `_sync_subs` rows for a socket that died WITHOUT a
+  // webSocketClose (hard termination) are orphans — nothing else deletes them.
+  // Their hygiene rides this same housekeeping path, so it gets the same
+  // drive-the-real-path treatment: seed an orphan row, cross the threshold,
+  // poll for the deferred sweep. Precision matters as much as deletion: the
+  // live socket's own row must survive the same sweep.
+  it("sweeps orphaned _sync_subs rows while keeping live sockets' rows", async () => {
+    const room = "mc-orphan-subs"
+    const ws = await openWs(room)
+    send(ws, { t: "sub", subId: "s1", collection: "messages" })
+    await waitForFrame(ws, (f) => f.t === "snap-end")
+
+    // Seed the orphan: a socket_id no live socket bears.
+    await runInDurableObject(maint(room), (_i, s) => {
+      s.storage.sql.exec(
+        "INSERT INTO _sync_subs(socket_id, sub_id, collection, where_ir) VALUES('dead-socket','s9','messages',NULL)",
+      )
+    })
+
+    const subRows = (): Promise<Array<string>> =>
+      runInDurableObject(maint(room), (_i, s) =>
+        Array.from(s.storage.sql.exec<{ socket_id: string }>("SELECT socket_id FROM _sync_subs")).map(
+          (r) => r.socket_id,
+        ),
+      )
+    expect((await subRows()).includes("dead-socket")).toBe(true) // seeded
+    expect((await subRows()).length).toBe(2) // orphan + the live sub's write-through row
+
+    // Cross compactionEvery=3 → housekeeping (incl. the sweep) is scheduled.
+    await insert(ws, "t1", "k1", "1")
+    await insert(ws, "t2", "k2", "2")
+    await insert(ws, "t3", "k3", "3")
+    await waitUntil(async () => {
+      const ids = await subRows()
+      return !ids.includes("dead-socket") && ids.length === 1 // orphan gone, live row kept
+    })
+    ws.close()
+  })
 })
