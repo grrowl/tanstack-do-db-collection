@@ -107,6 +107,35 @@ export class TransportClosedError extends Error {
   }
 }
 
+/** Settles an in-flight `mut`/`call` whose socket dropped UNEXPECTEDLY before the
+ *  server's `committed`/`rejected` receipt arrived — the outcome is genuinely
+ *  unknown to the client (issue #39 / ADR-0021). Distinct from every other
+ *  settlement so an app can hold its optimistic overlay instead of flashing a
+ *  rollback of a write the server may already have committed:
+ *
+ *  - not a `MutationRejectedError` — the server did NOT reject it;
+ *  - not the generic `Error("confirmation timeout: …")` — the socket died, it
+ *    did not stay open and go quiet;
+ *  - not a `TransportClosedError` — that is a `connect()`-time failure, not a
+ *    settled-in-flight mutation.
+ *
+ *  It is a FALLBACK: when the transport reconnects (subscriptions active,
+ *  non-terminal close) it first replays each in-flight txId through the server's
+ *  dedup table, so the TRUE outcome (`committed`/`rejected`) wins whenever it
+ *  arrives within the parked window. This error surfaces only when no reconnect
+ *  can resolve it (terminal 4xxx close, no active subscriptions) or the replay
+ *  does not answer before the parked timeout. The type is the contract: an app
+ *  catches it to keep the overlay pending until resubscribe converges the row. */
+export class ConnectionLostError extends Error {
+  constructor(
+    message = "connection lost before the server's receipt arrived; outcome unknown",
+    readonly txId?: string,
+  ) {
+    super(message)
+    this.name = "ConnectionLostError"
+  }
+}
+
 /** Reconnect delay policy (ADR-0016). Called once per reconnect attempt with
  *  the 1-based attempt number (reset to 1 after each successful open) and,
  *  when the drop came from a socket close, that close's code/reason (a failed
@@ -168,6 +197,12 @@ interface TxWaiter {
   resolve: (r: { result?: unknown }) => void
   reject: (e: Error) => void
   timer: ReturnType<typeof setTimeout>
+  /** The encoded frame, retained so an unexpected close can replay it through the
+   *  server's dedup table on reconnect (issue #39 / ADR-0021). */
+  frame: WireOut
+  /** True once an unexpected close has swapped this waiter's generic-timeout timer
+   *  for the bounded ConnectionLostError timer and marked it for replay-on-reconnect. */
+  parked: boolean
 }
 
 // --- Typed-command projection over the schema Api (`typeof schema`) ---------
@@ -401,10 +436,18 @@ export class WebSocketTransport<Api = unknown> {
         if (this.ws !== ws) return
         this.ws = null
         this.connectPromise = null
+        if (this.intentionallyClosed) return // close() owns pendingTx teardown
         // Auto-reconnect on an unexpected drop while subscriptions are active.
-        if (!this.intentionallyClosed && this.handlers.size > 0) {
+        if (this.handlers.size > 0) {
+          // Hold in-flight mut/call for dedup replay on reconnect (issue #39)
+          // BEFORE scheduling — a terminal policy then fails them typed below.
+          this.parkPendingForReplay()
           const { code, reason } = ev as { code?: number; reason?: string }
           this.scheduleReconnect(code, reason)
+        } else {
+          // No subscriptions → ADR-0016 does not reconnect, so no replay can ever
+          // learn the outcome: settle the in-flight mut/call now, typed (issue #39).
+          this.failPendingConnectionLost()
         }
       })
       this.ws = ws
@@ -418,6 +461,9 @@ export class WebSocketTransport<Api = unknown> {
       if (this.reconnecting) {
         this.reconnecting = false
         this.resubscribeAll()
+        // Replay any in-flight mut/call parked by the drop, so the dedup table
+        // answers each with its true recorded outcome (issue #39 / ADR-0021).
+        this.resendParkedTx()
       }
     })()
     this.connectPromise = p
@@ -459,6 +505,9 @@ export class WebSocketTransport<Api = unknown> {
       // accept-then-close auth rejection): retrying cannot help — surface the
       // close to the app instead of looping against the DO.
       this.onClosed?.(closeCode, closeReason)
+      // No reconnect will ever replay these — settle in-flight mut/call typed now
+      // rather than let the parked timer wait out timeoutMs (issue #39).
+      this.failPendingConnectionLost()
       return
     }
     this.reconnectTimer = setTimeout(() => {
@@ -490,6 +539,57 @@ export class WebSocketTransport<Api = unknown> {
         since,
       })
     }
+  }
+
+  /** Re-send every parked mut/call frame after a reconnect so the server's dedup
+   *  table answers each replayed txId with its recorded outcome — the
+   *  reconciliation half of issue #39 (ADR-0021). A txId the server never saw
+   *  (dropped before it was received) simply executes now; either way the parked
+   *  waiter settles with the TRUE outcome instead of a spurious rollback. Replay
+   *  stays inside the dedup window: the parked timer bounds the hold to timeoutMs
+   *  (≪ dedupRetentionMs), so a resend only fires while the recorded outcome is
+   *  still present. Runs on the FRESH socket (this.ws already installed). */
+  private resendParkedTx(): void {
+    if (!this.ws) return
+    for (const [, w] of this.pendingTx) {
+      if (!w.parked) continue
+      try {
+        this.sendRaw(w.frame)
+      } catch {
+        /* socket died again mid-resend; the parked timer still bounds the wait */
+      }
+    }
+  }
+
+  /** An unexpected close with a reconnect pending: HOLD each in-flight mut/call
+   *  for dedup replay rather than let its confirmation timeout fire a spurious
+   *  rollback of a write the server may already have committed (issue #39). Swap
+   *  the generic-timeout timer for a bounded ConnectionLostError timer so the wait
+   *  can't outlast timeoutMs — if the reconnect+replay answers first the true
+   *  outcome wins; otherwise the app gets the typed unknown-outcome error, never a
+   *  plain timeout. Already-parked waiters keep the first drop's bounded timer, so
+   *  a flapping connection can't extend the hold past timeoutMs from the first drop. */
+  private parkPendingForReplay(): void {
+    for (const [txId, w] of this.pendingTx) {
+      if (w.parked) continue
+      clearTimeout(w.timer)
+      w.parked = true
+      w.timer = setTimeout(() => {
+        this.pendingTx.delete(txId)
+        w.reject(new ConnectionLostError(`connection lost before receipt: txId=${txId}`, txId))
+      }, this.timeoutMs)
+    }
+  }
+
+  /** Settle every in-flight mut/call with the typed unknown-outcome error — used
+   *  when no reconnect will resolve them: a terminal 4xxx close, or an unexpected
+   *  drop with no active subscriptions (ADR-0016 reconnects only for live subs). */
+  private failPendingConnectionLost(): void {
+    for (const [txId, w] of this.pendingTx) {
+      clearTimeout(w.timer)
+      w.reject(new ConnectionLostError(`connection lost before receipt: txId=${txId}`, txId))
+    }
+    this.pendingTx.clear()
   }
 
   close(): void {
@@ -548,7 +648,25 @@ export class WebSocketTransport<Api = unknown> {
 
   unsubscribe(subId: string): void {
     this.handlers.delete(subId)
-    if (this.ws) this.sendFrame({ t: "unsub", subId })
+    if (this.ws) {
+      this.sendFrame({ t: "unsub", subId })
+      return
+    }
+    // Disconnected/reconnecting and the LAST subscription just went away: ADR-0016
+    // does not reconnect for zero subs, so a pending reconnect has nothing to
+    // resubscribe — and it must never silently reconnect just to REPLAY a parked
+    // mut/call (that would contradict ADR-0021's no-subs fallback). Cancel a
+    // still-pending reconnect timer, clear the reconnecting flag so any handshake
+    // already in flight installs WITHOUT resubscribing or replaying, and settle the
+    // parked in-flight mut/call typed now (issue #39 / ADR-0021). A dial already
+    // parked on open() is not force-aborted here — that would entangle ADR-0020's
+    // epoch/revival machinery; at worst it installs an idle, demand-less socket
+    // (as an initial connect also can), which the app disposes via close().
+    if (this.handlers.size === 0) {
+      this.clearReconnectTimer()
+      this.reconnecting = false
+      this.failPendingConnectionLost()
+    }
   }
 
   sendMut(frame: Extract<ClientFrame, { t: "mut" }>): Promise<{ result?: unknown }> {
@@ -628,12 +746,22 @@ export class WebSocketTransport<Api = unknown> {
       )
     }
     await this.connect()
+    // A txId identifies exactly ONE in-flight mut/call. A CONCURRENT reuse would
+    // overwrite the first waiter, then either waiter's timeout timer (deleting by
+    // key) could evict the other's entry — dropping a receipt and corrupting the
+    // parked-replay identity across a reconnect (issue #39 / ADR-0021). Reject the
+    // duplicate loud rather than corrupt state. A SEQUENTIAL retry after the first
+    // settled is fine: its entry is already gone, so this guard does not fire —
+    // exactly the retry-through-dedup the server is built to answer.
+    if (this.pendingTx.has(txId)) {
+      throw new MutationRejectedError(`txId already in flight: ${txId}`, "DUPLICATE_TXID")
+    }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingTx.delete(txId)
         reject(new Error(`confirmation timeout: txId=${txId}`))
       }, this.timeoutMs)
-      this.pendingTx.set(txId, { resolve, reject, timer })
+      this.pendingTx.set(txId, { resolve, reject, timer, frame: encoded, parked: false })
       // A socket may refuse a send synchronously (workerd does for frames over
       // its own cap). Clean up the waiter/timer before rejecting, or the stale
       // entry lingers with an armed timeout for timeoutMs (codex review).

@@ -61,6 +61,12 @@ While pre-1.0, the public API may change between 0.x releases.
   Additive and backward-compatible — existing openers compile and run
   unchanged — but a custom opener should honour it (close its socket, reject)
   so `close()` during an in-flight handshake frees a still-CONNECTING socket.
+- **New export `ConnectionLostError` (ADR-0021, issue #39).** Settles an
+  in-flight `mut`/`call` whose socket dropped unexpectedly before its receipt
+  arrived, when no reconnect+replay can resolve the true outcome — catchable and
+  `instanceof`-distinct from `MutationRejectedError`, `TransportClosedError`, and
+  the generic confirmation timeout. The type is the contract: an app catches it
+  to hold its optimistic overlay (the outcome is unknown) rather than roll back.
 
 ### Fixed
 
@@ -89,6 +95,19 @@ While pre-1.0, the public API may change between 0.x releases.
   sub after the socket opens — previously the server persisted a ghost
   subscription (ADR-0019) with no local consumer until the socket dropped.
   Pre-existing; surfaced by the SSR lift's adversary review.
+- **An in-flight `mut`/`call` is no longer abandoned to its generic timeout when
+  the socket drops unexpectedly (ADR-0021, issue #39).** Server-side, the durable
+  commit + broadcast run *before* the `committed` send, so a drop in that window
+  used to time out and roll back a write that had already succeeded. Now, on an
+  unexpected drop with subscriptions active, the transport HOLDS each in-flight
+  `mut`/`call` and REPLAYS it on reconnect; the server's dedup table answers the
+  replayed `txId` with its true recorded outcome — a committed write resolves
+  `committed` (never a timeout rollback) within the dedup window, a rejected one
+  rejects with its real `MutationRejectedError`. Where no reconnect can resolve it
+  (a terminal 4xxx close, or no active subscriptions), or the replay does not
+  answer within `timeoutMs` of the drop, the mutation settles promptly with the
+  new typed `ConnectionLostError` instead of the generic timeout. Timeout
+  semantics for a socket that stays open are unchanged.
 
 ## [0.6.0] — 2026-07-27
 
