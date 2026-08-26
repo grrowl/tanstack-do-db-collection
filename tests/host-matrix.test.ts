@@ -1,3 +1,4 @@
+import type { SqlStorage } from "@cloudflare/workers-types"
 import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
 import { createFrameCodec } from "../src/wire/frame-codec.ts"
@@ -295,5 +296,86 @@ describe("Syncable over a partyserver-like host (ADR-0015)", () => {
       expect(Array.from(state.storage.sql.exec("SELECT ('A' LIKE 'a') AS m"))[0]!.m).toBe(0)
     })
     onWs.close()
+  })
+})
+
+// The final cohosting-proof leg (ADR-0015 §"The cohosting proof"): "tddc defines
+// no `alarm()`. Compaction rides `ctx.waitUntil` (`mixin.ts`, `#maybeCompact`), so
+// the DO's single alarm slot stays wholly owned by the host." A partyserver host,
+// an Agent's scheduler, or a cron `alarm` can therefore claim that one slot without
+// contending with sync housekeeping.
+//
+// What these pin is the OBSERVABLE contract, not the internal mechanism:
+//   1. A housekeeping cycle leaves NO alarm armed — so it can never wake an idle DO
+//      (the exact hazard ADR-0006/0015 cite for choosing `waitUntil` over an alarm).
+//   2. A host's pre-set alarm SURVIVES a housekeeping cycle unchanged. This is the
+//      stronger guard: the DO exposes a SINGLE alarm slot, so any use of it by tddc
+//      would overwrite the host's value — its exact survival proves tddc never
+//      touched the slot, even transiently.
+// That the housekeeping actually RAN (the deferred `waitUntil` → compaction path, vs.
+// a no-op) is pinned in depth by `tests/maybe-compact.test.ts`; here we only re-drive
+// it far enough to poll its collapse, then assert the alarm invariant.
+//
+// Vehicle: MaintTestDO (compactionEvery=3). The mixin's compaction threshold is a
+// protected knob a non-DO host cannot override through the mixin's public type
+// (ADR-0015), and configure() carries no such option — so a low-threshold bare-DO
+// subclass is the only in-suite way to fire `#maybeCompact` after a few writes. The
+// property is base-independent: `#maybeCompact` is one shared mixin method, never an
+// `alarm()`.
+
+type MaintApi = { runSyncedWrite: <T>(fn: (sql: SqlStorage) => T) => T }
+const maintApi = (i: unknown): MaintApi => i as MaintApi
+const maint = (room: string) => env.MAINT_DO.get(env.MAINT_DO.idFromName(room))
+
+const getAlarm = (room: string): Promise<number | null> =>
+  runInDurableObject(maint(room), (_i, s) => s.storage.getAlarm())
+
+/** Total rows in the change log — collapses to a stable value once the deferred
+ *  compaction runs, so it is the effect we poll for (ADR-0009 latest-op-per-key). */
+const changeRowCount = (room: string): Promise<number> =>
+  runInDurableObject(maint(room), (_i, s) =>
+    Array.from(s.storage.sql.exec<{ n: number }>("SELECT count(*) AS n FROM _sync_changes"))[0]!.n,
+  )
+
+async function waitForCount(pred: () => Promise<boolean>, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  while (!(await pred())) {
+    if (Date.now() - start > timeoutMs) throw new Error("waitForCount timeout")
+    await new Promise((r) => setTimeout(r, 10))
+  }
+}
+
+/** Three server writes to one key cross compactionEvery=3: the third schedules the
+ *  `waitUntil` housekeeping, which collapses the key's three change rows to one.
+ *  Polling for that collapse proves the real deferred path ran (not just that a
+ *  function exists). registerSync already ran in the DO constructor (ADR-0007). */
+async function driveHousekeepingCycle(room: string): Promise<void> {
+  await runInDurableObject(maint(room), (instance) => {
+    maintApi(instance).runSyncedWrite((sql) => sql.exec("INSERT INTO messages(id,body) VALUES('hk','1')"))
+    maintApi(instance).runSyncedWrite((sql) => sql.exec("UPDATE messages SET body='2' WHERE id='hk'"))
+    maintApi(instance).runSyncedWrite((sql) => sql.exec("UPDATE messages SET body='3' WHERE id='hk'"))
+  })
+  await waitForCount(async () => (await changeRowCount(room)) === 1)
+}
+
+describe("host-owned alarm slot (ADR-0015)", () => {
+  it("a full maybeCompact housekeeping cycle arms no alarm", async () => {
+    const room = "alarm-none"
+    expect(await getAlarm(room)).toBeNull() // nothing scheduled at construction
+    await driveHousekeepingCycle(room) // real drain → #maybeCompact → waitUntil
+    // The housekeeping path never touched the alarm slot: it stays the host's.
+    expect(await getAlarm(room)).toBeNull()
+  })
+
+  it("a host-owned alarm survives a maybeCompact housekeeping cycle", async () => {
+    const room = "alarm-host"
+    // The host framework claims the DO's single alarm slot for its own schedule.
+    const when = Date.now() + 60 * 60 * 1000
+    await runInDurableObject(maint(room), (_i, s) => s.storage.setAlarm(when))
+    expect(await getAlarm(room)).toBe(when)
+
+    await driveHousekeepingCycle(room)
+    // tddc's housekeeping neither cleared nor rescheduled the host's alarm.
+    expect(await getAlarm(room)).toBe(when)
   })
 })
