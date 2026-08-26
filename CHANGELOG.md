@@ -45,9 +45,19 @@ While pre-1.0, the public API may change between 0.x releases.
   hooks shipped in 0.8.0; 0.8.5 carries the `commit()`-receipt contract and
   descriptor reuse this adapter adopts. The 0.6-era API is otherwise
   unchanged: the full pre-lift suite passes on 0.8.5 without modification.
-- The transport ignores frames from an abandoned socket (identity-guarded
-  message dispatch): only the current socket speaks for the stream. Dropped
-  frames are re-covered by the resubscribe catch-up from the applied cursor.
+- The transport ignores STREAM frames from an abandoned socket
+  (identity-guarded message dispatch): only the current socket speaks for the
+  stream; dropped frames are re-covered by the resubscribe catch-up from the
+  applied cursor. ID-scoped receipts (`committed`/`rejected`/`page`) still
+  settle their waiters from a stale socket — they are not re-covered by any
+  replay — but never advance the cursor.
+
+### Fixed
+
+- `unsubscribe` during an in-flight `subscribe`'s connect no longer sends the
+  sub after the socket opens — previously the server persisted a ghost
+  subscription (ADR-0019) with no local consumer until the socket dropped.
+  Pre-existing; surfaced by the SSR lift's adversary review.
 
 ## [0.6.0] — 2026-07-27
 

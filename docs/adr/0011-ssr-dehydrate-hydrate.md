@@ -305,12 +305,17 @@ decision, not drift:
   policy cannot declare it terminal. A failed open falls back into the normal
   policy-driven retry. The draft-era `suppressAdvance` flag is **replaced by a
   socket-identity guard on message dispatch** (only the current socket speaks
-  for the stream): the flag protected the cursor but still let an abandoned
+  for the STREAM): the flag protected the cursor but still let an abandoned
   socket's queued frames dispatch data, and its reset-at-install left a race
-  window; dropping stale frames entirely is strictly safer — the resubscribe
-  catch-up re-covers them idempotently. Main's own ADR-0016 machinery already
-  carried the scheduling-time `reconnecting` flag and the stale-close guard
-  this branch originally invented, so those SSR commits dropped out.
+  window. Stream frames (`snap`/`snap-end`/`d`/`uptodate`/`reset`) from a
+  stale socket are dropped — the resubscribe catch-up re-covers them
+  idempotently. ID-scoped receipts (`committed`/`rejected`/`page`) are NOT
+  re-covered by any replay, so a stale socket may still settle those waiters
+  — it just never advances the cursor (codex adversary: a committed mutation
+  must not be reported as timed out because a late hydration chunk forced a
+  reconnect first). Main's own ADR-0016 machinery already carried the
+  scheduling-time `reconnecting` flag and the stale-close guard this branch
+  originally invented, so those SSR commits dropped out.
 - **New upstream contracts adopted** (released after the draft): `commit()`
   receipts (`SyncAppliedReceipt`, 0.8.5) — snapshot terminals and cursor
   load-more settle `loadSubset` only once rows are visible; `markError`
@@ -321,6 +326,22 @@ decision, not drift:
   (documented follow-up): `LoadSubsetOptions.signal` — cooperative
   cancellation of a shared refcounted sub needs its own design; loads
   complete correctly without it.
+- **A second codex adversary round on the lift itself** hardened five more
+  edges, each pinned by a test: `parseSyncMeta` rejects a NEGATIVE cursor (it
+  would ride `since` to the server, draw a full snapshot the on-demand
+  catch-up handler discards, and leak the transient sub forever);
+  `mergeSyncMeta` with mismatched fingerprints yields the honest `"0"` under
+  our fingerprint (MIN alone could let the matching side's cursor smuggle
+  foreign-filter rows past import's check); `exportSyncMeta` is
+  settlement-gated (while any commit receipt is unsettled it claims the last
+  fully-settled position — the boundary cursor is not yet proof of applied
+  rows, and a dehydrate in that window must under-claim); a REJECTED receipt
+  fails its subset load / readiness rather than resolving it; and the
+  on-demand ready-gate failure path heals — the catch-up terminal and every
+  completed subset also `markReady()` (idempotent), so error → ready recovery
+  actually happens. Plus one pre-existing transport fix: `unsubscribe` during
+  an in-flight `subscribe`'s connect no longer sends a ghost sub the server
+  would persist (ADR-0019) with no local consumer.
 - **Upstream now natively reconciles hydration-seeded keys** (a later adapter
   `insert` of a seeded key is applied as an update — `hydrationSeedKeys`,
   0.8.0). D4's held-key upsert conversion stays: it is belt-and-braces on the

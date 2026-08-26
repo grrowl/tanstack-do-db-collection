@@ -220,4 +220,90 @@ describe("transport cursor bootstrap (SSR hydration, ADR-0011 D3)", () => {
     expect(t.appliedCursor).toBe("102")
     t.close()
   })
+
+  it("an abandoned socket still settles ID-scoped receipts — but never advances the cursor", async () => {
+    // codex finding: a regress-reconnect must not convert a COMMITTED mutation
+    // into a timeout — receipts are not re-covered by any replay. Stream
+    // frames from the stale socket stay dropped (the catch-up re-covers them).
+    const codec = createFrameCodec()
+    const fakes: Array<{
+      ws: WebSocketLike
+      sent: Array<ClientFrame>
+      emit: (type: string, ev: { data?: unknown }) => void
+    }> = []
+    const makeFake = () => {
+      const listeners = new Map<string, Array<(ev: { data?: unknown }) => void>>()
+      const fake = {
+        sent: [] as Array<ClientFrame>,
+        emit: (type: string, ev: { data?: unknown }) => {
+          for (const l of listeners.get(type) ?? []) l(ev)
+        },
+        ws: {
+          send: (data: string | ArrayBuffer | ArrayBufferView) =>
+            fake.sent.push(codec.decode(data as ArrayBuffer | string) as ClientFrame),
+          close: () => {},
+          addEventListener: (type: string, l: (ev: { data?: unknown }) => void) => {
+            const arr = listeners.get(type) ?? []
+            arr.push(l)
+            listeners.set(type, arr)
+          },
+          removeEventListener: () => {},
+        } as WebSocketLike,
+      }
+      fakes.push(fake)
+      return fake
+    }
+    const t = new WebSocketTransport({ url: "wss://fake", reconnectDelay: 1, open: () => makeFake().ws })
+    const { handler } = recorder()
+    await t.subscribe("s1", "messages", handler)
+    const emit = (frame: ServerFrame, i = fakes.length - 1): void =>
+      fakes[i]!.emit("message", { data: codec.encode(frame) })
+
+    emit({ t: "snap-end", sub: "s1", seq: "100" })
+    const mut = t.sendMut({ t: "mut", txId: "tx-1", collection: "messages", ops: [] })
+    const page = t.fetch({ t: "fetch", fetchId: "f-1", collection: "messages" })
+    // Both frames must be ON the old socket before the regress abandons it.
+    await waitFor(() => fakes[0]!.sent.some((f) => f.t === "mut") && fakes[0]!.sent.some((f) => f.t === "fetch"))
+
+    t.seedCursor("50") // regress → the socket that carries tx-1/f-1 is abandoned
+    expect(t.appliedCursor).toBe("50")
+
+    // The stale socket's receipts settle their waiters...
+    emit({ t: "committed", txId: "tx-1", seq: "101" }, 0)
+    emit({ t: "page", fetchId: "f-1", rows: [{ id: "x" }], seq: "101" }, 0)
+    await expect(mut).resolves.toEqual({ result: undefined })
+    await expect(page).resolves.toEqual([{ id: "x" }])
+    // ...but never the cursor; and its stream frames are dropped outright.
+    expect(t.appliedCursor).toBe("50")
+    emit({ t: "uptodate", seq: "102" }, 0)
+    expect(t.appliedCursor).toBe("50")
+    t.close()
+  })
+
+  it("unsubscribing while a subscribe's connect is in flight sends no ghost sub", async () => {
+    // codex finding: the suspended subscribe() body would send its `sub` after
+    // the open completes even though the handler is gone — the server persists
+    // a subscription nothing consumes (ADR-0019) until the socket drops.
+    const codec = createFrameCodec()
+    let openNow!: (ws: WebSocketLike) => void
+    const sent: Array<ClientFrame> = []
+    const ws: WebSocketLike = {
+      send: (data) => sent.push(codec.decode(data as ArrayBuffer | string) as ClientFrame),
+      close: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }
+    const t = new WebSocketTransport({
+      url: "wss://fake",
+      reconnectDelay: 1,
+      open: () => new Promise<WebSocketLike>((r) => (openNow = r)),
+    })
+    const { handler } = recorder()
+    const sub = t.subscribe("s1", "messages", handler) // parks on the pending open
+    t.unsubscribe("s1") // no socket yet: nothing to send the unsub on
+    openNow(ws)
+    await sub
+    expect(sent.filter((f) => f.t === "sub")).toEqual([])
+    t.close()
+  })
 })

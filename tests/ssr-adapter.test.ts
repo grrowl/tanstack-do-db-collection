@@ -196,4 +196,114 @@ describe("syncMeta hooks", () => {
     expect(merged.cursor).toBe("90")
     expect(o.sync.mergeSyncMeta({ v: 1, cursor: "100" }, { v: 1, cursor: "90" }).cursor).toBe("90")
   })
+
+  it("a NEGATIVE cursor is rejected — and on-demand still lands on the safe truncate path", async () => {
+    // codex finding: BigInt("-1") parses, seedCursor ignores it, but
+    // `since:"-1"` on the wire makes the server answer a full snapshot the
+    // catch-up handler discards — no terminal, the transient sub never tears
+    // down, stale hydrated rows survive forever. Parse must refuse it; the
+    // fail-loud-but-safe contract then routes sync start to "0" (truncate).
+    const calls: Array<string> = []
+    const truncated: Array<string> = []
+    const o = doCollectionOptions({
+      transport: spyTransport(calls),
+      table: "messages",
+      getKey: (r) => r.id,
+      syncMode: "on-demand",
+    }) as unknown as Hooked
+    expect(() => o.sync.importSyncMeta({ v: 1, cursor: "-1" })).toThrow(/negative/)
+    expect(calls).not.toContain("seed")
+    o.sync.sync({ ...controls, truncate: () => truncated.push("truncate"), markReady: () => {} })
+    await flush()
+    expect(truncated).toEqual(["truncate"]) // safe "0" route, not a since:"-1" catch-up
+    expect(calls.filter((c) => c.startsWith("sub:"))).toEqual([])
+  })
+
+  it("merge with MISMATCHED fingerprints yields cursor '0' — no sound joint resume point", () => {
+    // codex finding: MIN alone can return the side whose fingerprint matches
+    // ours while the OTHER side's foreign-filter rows were already applied —
+    // import would then accept a cursor whose catch-up never covers them.
+    const o = makeOpts() // our fingerprint: undefined
+    const merged = o.sync.mergeSyncMeta({ v: 1, cursor: "50", where: "AAA" }, { v: 1, cursor: "100", where: "BBB" })
+    expect(merged.cursor).toBe("0")
+    expect(merged.where).toBeUndefined() // OUR fingerprint, so import routes it to "0"
+    // Same fingerprints (even a foreign one) still MIN — import does the
+    // ours-vs-theirs check.
+    expect(o.sync.mergeSyncMeta({ v: 1, cursor: "50", where: "AAA" }, { v: 1, cursor: "100", where: "AAA" }).cursor).toBe("50")
+  })
+})
+
+describe("commit receipts (0.8.5 SyncAppliedReceipt)", () => {
+  /** Spy transport that CAPTURES subscribe handlers so a test can drive them. */
+  function capturingTransport(calls: Array<string>, handlers: Map<string, import("../src/client/transport.ts").SubHandler>): Transport<Api> {
+    const t = spyTransport(calls)
+    return {
+      ...t,
+      subscribe: async (subId, _c, handler) => {
+        calls.push(`sub:${subId}`)
+        handlers.set(subId, handler)
+      },
+    }
+  }
+
+  it("a REJECTED receipt fails the subset load — an aborted application is not success", async () => {
+    const calls: Array<string> = []
+    const handlers = new Map<string, import("../src/client/transport.ts").SubHandler>()
+    const opts = doCollectionOptions({
+      transport: capturingTransport(calls, handlers),
+      table: "messages",
+      getKey: (r) => r.id,
+      syncMode: "on-demand",
+    }) as unknown as Hooked
+    const res = opts.sync.sync({
+      ...controls,
+      commit: () => Promise.reject(new Error("aborted application")),
+      markReady: () => {},
+      markError: () => {},
+    } as never) as { loadSubset: (o: unknown) => true | Promise<void> }
+    await flush()
+    const load = res.loadSubset({}) as Promise<void>
+    const settled = load.then(
+      () => "resolved",
+      (e: Error) => `rejected:${e.message}`,
+    )
+    await flush()
+    const h = handlers.get("messages#null")!
+    h.onSnap(undefined, { id: "a", body: "x" })
+    h.onSnapEnd() // flush → rejected receipt
+    await expect(settled).resolves.toBe("rejected:aborted application")
+  })
+
+  it("exportSyncMeta never claims a boundary whose receipt is unsettled", async () => {
+    // codex finding: the transport cursor advances at the boundary, but the
+    // commit's application can settle later — a dehydrate in that window would
+    // serialize pre-boundary rows under meta claiming the boundary.
+    const calls: Array<string> = []
+    const handlers = new Map<string, import("../src/client/transport.ts").SubHandler>()
+    let settle!: () => void
+    const receipt = new Promise<void>((r) => {
+      settle = r
+    })
+    const opts = doCollectionOptions({
+      transport: capturingTransport(calls, handlers),
+      table: "messages",
+      getKey: (r) => r.id,
+    }) as unknown as Hooked
+    expect(opts.sync.exportSyncMeta().cursor).toBe("7") // nothing pending: the live claim
+    opts.sync.sync({
+      ...controls,
+      collection: { get: () => undefined, _state: { syncedData: new Map() } },
+      commit: () => receipt,
+      markReady: () => {},
+      markError: () => {},
+    } as never)
+    await flush()
+    const h = handlers.get([...handlers.keys()][0]!)!
+    h.onSnap(undefined, { id: "a", body: "x" })
+    h.onSnapEnd() // flush → pending receipt
+    expect(opts.sync.exportSyncMeta().cursor).toBe("0") // under-claim, never the unproven "7"
+    settle()
+    await flush()
+    expect(opts.sync.exportSyncMeta().cursor).toBe("7") // settled: live claim again
+  })
 })

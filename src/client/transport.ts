@@ -316,14 +316,18 @@ export class WebSocketTransport<Api = unknown> {
         /* some socket impls don't expose binaryType; codec handles AB/Uint8Array */
       }
       ws.addEventListener("message", (ev) => {
-        // Only the CURRENT socket speaks for the stream. An abandoned socket
+        // Only the CURRENT socket speaks for the STREAM. An abandoned socket
         // (forceReconnect regress, a superseded reconnect) can still deliver
-        // queued frames — applying them, or worse advancing the cursor on
-        // them, would claim positions the fresh socket's replay is about to
-        // own (ADR-0011 D3). Dropped frames are re-covered by the resubscribe
-        // catch-up from the applied cursor, so nothing is lost — idempotently.
-        if (this.ws !== ws) return
-        this.onMessage(ev.data)
+        // queued frames — applying its stream frames, or worse advancing the
+        // cursor on them, would claim positions the fresh socket's replay is
+        // about to own (ADR-0011 D3). Dropped stream frames are re-covered by
+        // the resubscribe catch-up from the applied cursor, idempotently.
+        // ID-scoped receipts (`committed`/`rejected`/`page`) are NOT
+        // re-covered by any replay, so a stale socket may still settle those
+        // waiters — it just never advances the cursor (codex review: a
+        // committed mutation must not be reported as timed out because a late
+        // hydration chunk forced a reconnect first).
+        this.onMessage(ev.data, this.ws !== ws)
       })
       ws.addEventListener("close", (ev) => {
         // Only the CURRENT socket's close may detach/reconnect. A stale
@@ -457,6 +461,11 @@ export class WebSocketTransport<Api = unknown> {
   ): Promise<void> {
     this.handlers.set(subId, { handler, collection, where, orderBy, limit })
     await this.connect()
+    // Unsubscribed while the connect was in flight (its `unsub` had no socket
+    // to ride): sending now would register a ghost subscription the server
+    // persists (ADR-0019) with no local handler — dead weight against the
+    // sub cap until the socket drops (codex review).
+    if (!this.handlers.has(subId)) return
     this.sendFrame({ t: "sub", subId, collection, where, orderBy, limit, since })
   }
 
@@ -570,7 +579,7 @@ export class WebSocketTransport<Api = unknown> {
     this.ws.send(data)
   }
 
-  private onMessage(data: unknown): void {
+  private onMessage(data: unknown, stale = false): void {
     let frame: ServerFrame
     try {
       frame = this.codec.decode(data as ArrayBuffer | string) as ServerFrame
@@ -579,16 +588,20 @@ export class WebSocketTransport<Api = unknown> {
     }
     switch (frame.t) {
       case "snap":
+        if (stale) return
         this.handlers.get(frame.sub)?.handler.onSnap(frame.key, frame.row)
         return
       case "snap-end":
+        if (stale) return
         this.handlers.get(frame.sub)?.handler.onSnapEnd()
         this.advance(frame.seq)
         return
       case "d":
+        if (stale) return
         this.handlers.get(frame.sub)?.handler.onDelta(frame.op, frame.key, frame.cols)
         return
       case "uptodate":
+        if (stale) return
         // A sub-scoped terminal (a catch-up's) goes to its handler alone; a
         // broadcast boundary (coalescer tick / barrier flush) goes to all.
         if (frame.sub) this.handlers.get(frame.sub)?.handler.onUptodate(true)
@@ -602,7 +615,7 @@ export class WebSocketTransport<Api = unknown> {
           this.pendingTx.delete(frame.txId)
           w.resolve({ result: frame.result })
         }
-        this.advance(frame.seq)
+        if (!stale) this.advance(frame.seq)
         return
       }
       case "rejected": {
@@ -624,6 +637,7 @@ export class WebSocketTransport<Api = unknown> {
         return
       }
       case "reset":
+        if (stale) return
         if (frame.sub) this.handlers.get(frame.sub)?.handler.onReset()
         else for (const { handler } of this.handlers.values()) handler.onReset()
         return

@@ -88,7 +88,11 @@ function parseSyncMeta(meta: unknown): DoSyncMeta {
   if (m == null || m.v !== 1 || typeof m.cursor !== "string" || (m.where !== undefined && typeof m.where !== "string")) {
     throw new Error(`unrecognized sync meta (expected {v:1, cursor, where?}): ${JSON.stringify(meta)}`)
   }
-  BigInt(m.cursor) // malformed cursor throws here — fail loud, never resume from garbage
+  // Malformed throws; NEGATIVE is rejected too (codex review): seedCursor
+  // ignores it but `since:"-1"` would reach the server, which answers a
+  // full snapshot the on-demand catch-up handler discards — no terminal, the
+  // transient sub never tears down, and stale hydrated rows survive forever.
+  if (BigInt(m.cursor) < 0n) throw new Error(`negative sync-meta cursor: ${m.cursor}`)
   return { v: 1, cursor: m.cursor, ...(m.where === undefined ? {} : { where: m.where }) }
 }
 
@@ -169,6 +173,17 @@ export function doCollectionOptions(opts: {
   // lose everything below it.
   let hydratedCursor: string | null = null
 
+  // Settlement gate for the syncMeta claim (codex review): the transport's
+  // cursor advances at commit BOUNDARIES, but a commit's SyncAppliedReceipt
+  // may settle later (application queued behind a persisting user
+  // transaction). Exporting the boundary cursor in that window would dehydrate
+  // pre-boundary rows under meta claiming the boundary — a resume that skips
+  // the gap forever. While any receipt is unsettled, exportSyncMeta claims the
+  // last fully-settled position instead (under-claiming is always safe: MIN
+  // semantics, idempotent replay).
+  let pendingReceipts = 0
+  let settledCursor = "0"
+
   const sync = (params: SyncParams): SyncConfigResult => {
     const { collection, begin, write, commit, markReady, markError, truncate } = params
     const consumeHydratedCursor = (): string | null => {
@@ -195,28 +210,57 @@ export function doCollectionOptions(opts: {
         open = true
       }
     }
+    /** Book a commit's receipt against the settlement gate (see
+     *  pendingReceipts). Returns the ORIGINAL receipt so callers still await
+     *  and propagate rejection; the passive branch also keeps a fire-and-
+     *  forget flush from surfacing as an unhandled rejection. */
+    const track = (receipt: CommitReceipt): CommitReceipt => {
+      const r = receipt as { then?: (a: () => void, b: () => void) => unknown }
+      if (r != null && typeof r.then === "function") {
+        pendingReceipts++
+        const settle = (): void => {
+          pendingReceipts--
+          // Everything booked has applied: the transport's position is a
+          // sound claim again from here.
+          if (pendingReceipts === 0) settledCursor = transport.appliedCursor
+        }
+        void r.then(settle, settle)
+      } else if (pendingReceipts === 0) {
+        settledCursor = transport.appliedCursor
+      }
+      return receipt
+    }
     /** Commit the open transaction; the receipt settles when rows are visible
      *  (`true` = already are). The 0.8.5 loadSubset contract chains on it. */
     const flush = (): CommitReceipt => {
       if (!open) return true
       open = false
-      return commit()
+      return track(commit())
     }
-    /** Run `fn` once `receipt` says the rows are visible. Thenable-sniffed —
-     *  anything non-promise (incl. `true`, and bare harness mocks returning
-     *  void) means "already applied". */
-    const afterApplied = (receipt: CommitReceipt, fn: () => void): void => {
-      const r = receipt as { then?: (a: () => void, b: () => void) => unknown }
-      if (r != null && typeof r.then === "function") void r.then(fn, fn) // an aborted application still settles the gate
-      else fn()
+    /** Run `onApplied` once `receipt` says the rows are visible; a REJECTED
+     *  receipt (the application was aborted, 0.8.5) is a failure, not
+     *  success — it must not resolve a subset load or readiness (codex
+     *  review). Thenable-sniffed — anything non-promise (incl. `true`, and
+     *  bare harness mocks returning void) means "already applied". */
+    const afterApplied = (receipt: CommitReceipt, onApplied: () => void, onFail: (e: unknown) => void): void => {
+      const r = receipt as { then?: (a: () => void, b: (e: unknown) => void) => unknown }
+      if (r != null && typeof r.then === "function") void r.then(onApplied, onFail)
+      else onApplied()
     }
     emptyCommit = (): void => {
       flush()
       begin()
-      commit() // a standalone empty boundary; runs the direct-upsert clear path
+      track(commit()) // a standalone empty boundary; runs the direct-upsert clear path
     }
 
-    const makeHandler = (onReady: () => void, opts?: { reconcileSnapshots?: boolean }): SubHandler => {
+    const makeHandler = (
+      onReady: () => void,
+      opts?: { reconcileSnapshots?: boolean; onFail?: (e: unknown) => void },
+    ): SubHandler => {
+      // Where a rejected receipt lands: a subset load rejects ITS promise; the
+      // collection-level default fails readiness loud (a later markReady —
+      // any successful snapshot — recovers, error → ready).
+      const onFail = opts?.onFail ?? ((e: unknown): void => markError?.(e))
       // `reconcileSnapshots` (armed for every EAGER sub, never for on-demand
       // subset subs — a subset snapshot must not delete other subsets' rows):
       // a snapshot is authoritative SET semantics over the synced rows —
@@ -253,7 +297,7 @@ export function doCollectionOptions(opts: {
               }
             }
           }
-          afterApplied(flush(), onReady)
+          afterApplied(flush(), onReady, onFail)
         },
         onDelta: (op, key, cols) => {
           ensureBegin()
@@ -277,7 +321,7 @@ export function doCollectionOptions(opts: {
           // promise — and the live query's preload() — would hang forever. For a
           // compaction/rotation reset (a valid sub that re-snapshots) this is an
           // idempotent no-op: onSnapEnd's onReady() has already fired.
-          afterApplied(commit(), onReady)
+          afterApplied(track(commit()), onReady, onFail)
         },
       }
     }
@@ -321,14 +365,23 @@ export function doCollectionOptions(opts: {
             onDelta: makeHandler(() => {}).onDelta,
             onUptodate: (ownTerminal) => {
               flush()
-              if (ownTerminal) done()
+              if (ownTerminal) {
+                done()
+                // Also heals an earlier failed gate (error → ready, 0.8.2):
+                // the readyGate rejected, the policy-driven reconnect
+                // resubscribed this catch-up, and its terminal is the first
+                // proof the collection is usable again (codex review —
+                // idempotent when the gate already marked ready).
+                markReady()
+              }
             },
             onReset: () => {
               flush()
               begin()
               truncate()
-              commit()
+              track(commit())
               done() // before the trailing resnapshot frames arrive
+              markReady() // same healing as the terminal path
             },
           },
           undefined,
@@ -341,7 +394,7 @@ export function doCollectionOptions(opts: {
         readyGate = transport.connect().then(() => {
           begin()
           truncate()
-          commit()
+          track(commit())
         })
       } else {
         readyGate = transport.connect()
@@ -411,9 +464,18 @@ export function doCollectionOptions(opts: {
         // Forward orderBy/limit so the INITIAL snapshot is the bounded window
         // (recent N), not the whole where-subset. The live sub's predicate is
         // still `where`, so entering rows (e.g. new messages) are delivered.
-        // A send failure rejects THIS load (0.8.4 surfaces it per-subscription
-        // as loadSubset:error), not the whole collection.
-        void transport.subscribe(subId, table, makeHandler(resolve), o.where, o.orderBy, o.limit).catch(reject)
+        // A send failure or rejected receipt rejects THIS load (0.8.4 surfaces
+        // it per-subscription as loadSubset:error), not the whole collection.
+        // A completed subset also (re)marks ready — the recovery path out of a
+        // failed ready-gate's error state (idempotent otherwise).
+        const handler = makeHandler(
+          () => {
+            resolve()
+            markReady()
+          },
+          { onFail: reject },
+        )
+        void transport.subscribe(subId, table, handler, o.where, o.orderBy, o.limit).catch(reject)
         return ready
       }
 
@@ -526,7 +588,11 @@ export function doCollectionOptions(opts: {
   // honest-truncate route); no-claim is the absence of meta. On the server the
   // SSR transport's reads establish the position this exports.
   const exportSyncMeta = (): DoSyncMeta | undefined => {
-    const cursor = transport.hasPosition ? transport.appliedCursor : hydratedCursor
+    // While a commit's receipt is unsettled the boundary cursor is not yet a
+    // sound claim — export the last fully-settled position instead (see
+    // pendingReceipts). Under-claiming is always safe.
+    const live = pendingReceipts === 0 ? transport.appliedCursor : settledCursor
+    const cursor = transport.hasPosition ? live : hydratedCursor
     if (cursor === null) return undefined
     return {
       v: 1,
@@ -573,6 +639,16 @@ export function doCollectionOptions(opts: {
     } catch (e) {
       hydratedCursor = "0"
       throw e
+    }
+    // Fingerprint skew between the two sides means SOME chunk's rows were
+    // dehydrated under a filter that is not ours — and they were APPLIED (no
+    // veto). MIN would let the matching side's cursor survive the merge and
+    // sail through import's fingerprint check, leaving the foreign rows with
+    // no catch-up that covers them (codex review). No sound joint resume
+    // point exists: return the honest "0" (snapshot-reconcile / on-demand
+    // truncate route) under OUR fingerprint so import routes it there.
+    if (a.where !== b.where) {
+      return { v: 1, cursor: "0", ...(whereFingerprint === undefined ? {} : { where: whereFingerprint }) }
     }
     // MIN is self-healing: a late chunk's rows were already applied over
     // newer state (no veto); resuming from the EARLIER position replays the
