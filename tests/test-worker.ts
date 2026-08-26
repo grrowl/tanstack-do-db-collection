@@ -213,7 +213,12 @@ export class SyncTestDO extends SyncDurableObject<unknown, Claims> {
   }
 
   protected override parseAttachment(req: Request): Claims {
-    return { userId: req.headers.get("x-user") ?? "anon" }
+    const userId = req.headers.get("x-user") ?? "anon"
+    // Sentinel for the auth-gate tests: parseAttachment is the ONE gate for both
+    // the WS upgrade and the SSR readSyncSnapshot read (ADR-0011 D1) — a rejecting
+    // identity must reject both paths, so a tenant check can't be bypassed by SSR.
+    if (userId === "forbidden") throw new Response("forbidden", { status: 403 })
+    return { userId }
   }
 }
 

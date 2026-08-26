@@ -28,6 +28,7 @@ import {
   currentSeq,
   ensureTriggers,
   getDrainCursor,
+  highWaterSeq,
   hydrateRows,
   initSchema,
   minChangeSeq,
@@ -109,10 +110,27 @@ export interface SyncApi<Env, TUser> {
   drainAndBroadcast(): void
 }
 
+/** One consistent snapshot read for SSR (ADR-0011 D1): the request shape and
+ *  result of `readSyncSnapshot`, callable over the DO binding as plain RPC. */
+export interface SyncSnapshotReq {
+  collection: string
+  where?: unknown
+  orderBy?: unknown
+  limit?: number
+}
+export interface SyncSnapshotRes {
+  rows: Array<Record<string, SqlStorageValue>>
+  cursor: string
+}
+
 /** The surface the mixin adds to `Base`. The four methods are real, runtime-
- *  dispatched overrides so workerd finds them on the prototype. */
+ *  dispatched overrides so workerd finds them on the prototype;
+ *  `readSyncSnapshot` is public (not behind the `sync` facade) because DO RPC
+ *  dispatches only on public instance members — one deliberate addition to the
+ *  host-collision surface (ADR-0011 D1, amending ADR-0015's four-method rule). */
 export interface SyncMixin<Env, TUser> {
   readonly sync: SyncApi<Env, TUser>
+  readSyncSnapshot(req: SyncSnapshotReq, request: Request): Promise<SyncSnapshotRes>
   fetch(request: Request): Promise<Response>
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void>
   webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void | Promise<void>
@@ -334,6 +352,52 @@ export function Syncable<Env = unknown, TUser = unknown>() {
       }
 
       // ---- runtime-dispatched overrides --------------------------------------
+
+      /**
+       * One consistent snapshot of a collection plus a durable resume cursor,
+       * WITHOUT a WebSocket — the SSR read path (ADR-0011 D1). Throws on an
+       * unknown collection or an un-lowerable predicate (fail loud; RPC
+       * propagates the error to the caller).
+       *
+       * `request` is REQUIRED and runs through the SAME gate as the WS upgrade:
+       * the configured `parseAttachment` — pass the claims-bearing Request the
+       * worker already forges (or forwards) for the socket path. One hook guards
+       * both paths, so an author's tenant check cannot be silently bypassed by
+       * the read path (and the minted claims are the seam where uniform
+       * read-scoping would land, on subs and snapshots alike). A rejecting
+       * parseAttachment rejects the RPC. The await happens BEFORE the reads:
+       * rows and cursor are still taken at one position (synchronous SQLite,
+       * no await between them).
+       *
+       * The cursor is the durable high-water mark, not bare `currentSeq` — see
+       * `highWaterSeq`. A cursor of "0" honestly means "no resume point" and the
+       * client must reconcile a fresh snapshot instead of catching up.
+       *
+       * BLOB parity (ADR-0017): the WS path's codec normalizes bare ArrayBuffer
+       * to Uint8Array; RPC structured clone would leak ArrayBuffer through, so
+       * rows are normalized here — one blob shape on both paths.
+       */
+      async readSyncSnapshot(req: SyncSnapshotReq, request: Request): Promise<SyncSnapshotRes> {
+        await this.#parseAttachmentHook(request) // the one gate (claims unused until read-scoping exists)
+        const coll = this.#registry.collections.get(req.collection)
+        if (!coll) throw new Error(`readSyncSnapshot: unknown collection '${req.collection}'`)
+        const query = compileSubsetQuery(req.collection, {
+          where: req.where,
+          orderBy: req.orderBy,
+          limit: req.limit,
+        })
+        const rows = Array.from(this.#sql.exec(query.sql, ...query.params)).map((row) => {
+          let out: Record<string, SqlStorageValue> | undefined
+          for (const [k, v] of Object.entries(row)) {
+            if (v instanceof ArrayBuffer) {
+              out ??= { ...row }
+              out[k] = new Uint8Array(v) as unknown as SqlStorageValue
+            }
+          }
+          return out ?? row
+        }) as Array<Record<string, SqlStorageValue>>
+        return { rows, cursor: String(highWaterSeq(this.#sql)) }
+      }
 
       override async fetch(req: Request): Promise<Response> {
         if (req.headers.get("Upgrade") === "websocket" && this.#claimsUpgrade(req)) {
@@ -1006,7 +1070,9 @@ export function Syncable<Env = unknown, TUser = unknown>() {
             this.#send(ws, { t: "d", sub: sub.subId, key, op: change.op, cols: row, seq })
           }
         }
-        this.#send(ws, { t: "uptodate", seq })
+        // Sub-scoped terminal: this catch-up is one subscription's bootstrap, not
+        // a socket-wide boundary (ADR-0011 D3). Still advances the client cursor.
+        this.#send(ws, { t: "uptodate", seq, sub: sub.subId })
       }
 
       /** Encode and send a server frame on one socket. Warns — and still sends
