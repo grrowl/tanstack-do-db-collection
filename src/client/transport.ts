@@ -63,6 +63,13 @@ export interface Transport<Api = unknown> {
   fetch(frame: Extract<ClientFrame, { t: "fetch" }>): Promise<Array<unknown>>
   close(): void
   readonly appliedCursor: string
+  /** True once this transport has established a stream position of its own —
+   *  even position 0 (an SSR read against a DO with no history is a REAL
+   *  claim: "no resume point", the honest-truncate route). False means no
+   *  claim at all (a fresh browser transport) — exportSyncMeta then exports
+   *  nothing rather than a spurious "0" that would win a MIN-merge against
+   *  every real dehydrated cursor (ADR-0011 D3, merged-upstream semantics). */
+  readonly hasPosition: boolean
   seedCursor(cursor: string): void
 }
 
@@ -221,6 +228,13 @@ export class WebSocketTransport<Api = unknown> {
   /** Highest committed position the client has applied (stringified bigint). */
   get appliedCursor(): string {
     return String(this.appliedSeq)
+  }
+
+  /** A live transport's position exists once anything has advanced (or seeded)
+   *  the cursor — it can never claim position 0 (seedCursor("0") is a no-op),
+   *  so 0 here honestly means "no claim yet". */
+  get hasPosition(): boolean {
+    return this.appliedSeq !== 0n
   }
 
   /**

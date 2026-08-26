@@ -52,7 +52,7 @@ function startFiltered(transport: WebSocketTransport<TestApi>, where: unknown): 
   const calls: Array<Call> = []
   const adapter = doCollectionOptions({ transport, table: "messages", getKey: (r) => r.id, where })
   ;(adapter as unknown as { sync: { sync: (p: unknown) => void } }).sync.sync({
-    collection: { get: () => undefined }, // adapter consults held keys (held-insert upsert)
+    collection: { get: () => undefined, _state: { syncedData: new Map() } }, // adapter consults synced rows
     begin: () => calls.push(["begin"]),
     write: (m: unknown) => calls.push(["write", m]),
     commit: () => calls.push(["commit"]),
