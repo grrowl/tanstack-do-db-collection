@@ -1093,7 +1093,19 @@ export function Syncable<Env = unknown, TUser = unknown>() {
               `full-row rebroadcast; column projection (issue #28) is the real fix`,
           )
         }
-        ws.send(encoded)
+        // A socket can transition to CLOSING/CLOSED between when we decided to
+        // send and now — a client disposing, navigating away, or a forced
+        // reconnect dropping mid-snapshot (issue #40). `webSocketClose` already
+        // tears down this socket's subs (#dropSocketSubs), so a frame it can no
+        // longer read is a benign no-op, NOT an error to surface as an uncaught
+        // throw. Pre-check readyState; the try/catch covers the OPEN→closed race
+        // the check can't (state can change under us between check and send).
+        if (ws.readyState !== WebSocket.OPEN) return
+        try {
+          ws.send(encoded)
+        } catch {
+          // "Can't call send() after close()" — the close beat us here. See above.
+        }
       }
 
       /** The attachment bound at upgrade, surviving hibernation. */

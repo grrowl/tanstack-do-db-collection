@@ -1,5 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test"
 import { describe, expect, it } from "vitest"
+import { createFrameCodec } from "../src/wire/frame-codec.ts"
 
 // WHY: the lifecycle is the load-bearing transport. These drive a real
 // WebSocket through workerd end to end. They pin: the upgrade contract, the
@@ -63,6 +64,36 @@ describe("SyncDurableObject WebSocket lifecycle (M2)", () => {
     // The socket stays usable: a following ping still pongs.
     ws.send("ping")
     expect(await nextMessage(ws)).toBe("pong")
+    ws.close()
+  })
+
+  // A client that subscribes then vanishes before the snapshot finishes
+  // streaming is normal churn (dispose, navigate-away, StrictMode teardown,
+  // forced reconnect). The server must not throw "Can't call send() after
+  // close()" into the runtime as an uncaught exception (issue #40). Drive the
+  // exact path deterministically: close the server-side socket, then hand it
+  // the `sub` frame — every #send target (here, the terminal `snap-end`) is now
+  // post-close. On unguarded `ws.send` this rejects the message promise; the
+  // guard makes it a benign no-op.
+  it("a sub arriving on a socket closed mid-snapshot is a no-op, not an uncaught throw", async () => {
+    const ws = await openWs("/sync/room-abrupt-close")
+    const stub = env.SYNC_DO.get(env.SYNC_DO.idFromName("room-abrupt-close"))
+    const frame = createFrameCodec().encode({ t: "sub", subId: "s1", collection: "messages" })
+    const bytes = frame instanceof Uint8Array ? frame : new TextEncoder().encode(frame)
+
+    await runInDurableObject(stub, async (instance, state) => {
+      const [serverWs] = state.getWebSockets()
+      expect(serverWs).toBeDefined()
+      serverWs!.close(1000, "gone")
+      // Must resolve — an unguarded #send throws here and rejects the promise.
+      await expect(
+        (instance as { webSocketMessage(ws: WebSocket, m: ArrayBuffer): Promise<void> }).webSocketMessage(
+          serverWs!,
+          bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+        ),
+      ).resolves.toBeUndefined()
+    })
+
     ws.close()
   })
 })
