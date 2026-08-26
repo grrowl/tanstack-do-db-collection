@@ -8,6 +8,57 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ## [Unreleased]
 
+### Added
+
+- **SSR support (experimental, ADR-0011)** — built on TanStack DB's merged
+  SSR API (`DbClient` `dehydrate()`/`hydrate()`, PR
+  [#1564](https://github.com/TanStack/db/pull/1564), shipped in
+  `@tanstack/db` 0.8.0).
+  - **Server:** `readSyncSnapshot(req, request)` — one consistent
+    `{rows, cursor}` read over the DO binding, no WebSocket. The required
+    `request` runs through `parseAttachment`: one auth gate for the socket
+    and the read path. The cursor is a durable high-water mark
+    (`max(currentSeq, drainCursor)` — robust to retention pruning); `"0"`
+    honestly means "no resume point". RPC rows normalize BLOB
+    `ArrayBuffer → Uint8Array` for wire-codec parity (ADR-0017).
+  - **Client:** `SsrSnapshotTransport` (read-only; per-request; swapped at
+    the new structural `Transport<Api>` seam), syncMeta cursor round-trip
+    (`{v, cursor, where-fingerprint}`; fail-loud-but-safe import/merge),
+    `since` on the first sub, `seedCursor` (a late chunk regresses and
+    replays via a forced reconnect), always-armed eager snapshot reconcile
+    (authoritative set semantics — no flash-to-empty, no stranded deletes),
+    on-demand transient catch-up with honest truncate for unresumable rows.
+  - **Wire (additive):** `uptodate` gains optional `sub` (a catch-up's
+    terminal is sub-scoped); the first `sub` may carry `since`.
+- **New upstream contracts adopted:** `commit()` receipts
+  (`SyncAppliedReceipt`, 0.8.5) — subset loads settle only once rows are
+  visible; `markError` (0.8.2) — a failed first connect fails `preload()`
+  loud with the cause instead of hanging (a retried `preload()` recovers);
+  per-subset load failures reject that subset's promise (0.8.4);
+  `withCollectionConfigFactory` (0.8.0) — `doCollectionOptions` configs work
+  as `collectionOptions(id, …)` descriptors with fresh adapter state per
+  `DbClient`.
+
+### Changed
+
+- **Peer dependency: `@tanstack/db >= 0.8.5`** (was `>= 0.6.0`) — the SSR
+  hooks shipped in 0.8.0; 0.8.5 carries the `commit()`-receipt contract and
+  descriptor reuse this adapter adopts. The 0.6-era API is otherwise
+  unchanged: the full pre-lift suite passes on 0.8.5 without modification.
+- The transport ignores STREAM frames from an abandoned socket
+  (identity-guarded message dispatch): only the current socket speaks for the
+  stream; dropped frames are re-covered by the resubscribe catch-up from the
+  applied cursor. ID-scoped receipts (`committed`/`rejected`/`page`) still
+  settle their waiters from a stale socket — they are not re-covered by any
+  replay — but never advance the cursor.
+
+### Fixed
+
+- `unsubscribe` during an in-flight `subscribe`'s connect no longer sends the
+  sub after the socket opens — previously the server persisted a ghost
+  subscription (ADR-0019) with no local consumer until the socket dropped.
+  Pre-existing; surfaced by the SSR lift's adversary review.
+
 ## [0.6.0] — 2026-07-27
 
 ### Added

@@ -70,7 +70,11 @@ export type ServerFrame =
   // Live delta; `cols` is a partial (top-level) patch, absent for delete.
   | { t: "d"; sub: string; key: unknown; op: RowOp; cols?: Record<string, unknown>; seq: Cursor }
   // Batch boundary — client commits the buffered sync transaction here.
-  | { t: "uptodate"; seq: Cursor }
+  // `sub` scopes a CATCH-UP's terminal to its subscription (ADR-0011 D3): a
+  // transient hydration catch-up must distinguish its own terminal from a
+  // coalescer/barrier boundary, or it unsubscribes early and drops its own
+  // deltas. Absent on broadcast boundaries (additive, backwards-compatible).
+  | { t: "uptodate"; seq: Cursor; sub?: string }
   // Mutation receipt (the no-subscription-match path lives here; ADR-0002 C1/C2).
   | { t: "committed"; txId: TxId; seq: Cursor; result?: unknown }
   | { t: "rejected"; txId: TxId; error: { code?: string; message: string } }
