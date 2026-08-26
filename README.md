@@ -267,6 +267,45 @@ same socket: `transport.call.<name>(args)` (typed sugar) or the low-level
 `transport.sendCall("clearRoom", undefined)` — both mint the txId for you and
 resolve with the command's result on `committed`.
 
+#### Transport lifecycle & reconnect
+
+The transport auto-reconnects on an unexpected drop and resubscribes every
+collection from its single applied cursor (a windowed catch-up, not a
+re-snapshot). Tune the pacing with `reconnectDelay` (a base-delay `number` for
+the default jittered backoff, or a full `(attempt, closeCode?, closeReason?) =>
+number | null` policy — return `null` to stop). Application close codes
+(4000-4999) are terminal by default; wire `onClosed(code, reason)` to observe a
+deliberate server close (e.g. an auth rejection) — see
+[ADR-0016](./docs/adr/0016-reconnect-policy.md).
+
+`close()` disposes the transport, and `connect()` **revives** it: a later
+`connect()` clears the intentional-close latch, so a reused transport
+auto-reconnects and delivers `onClosed` again. A `connect()` (and any
+`subscribe`/`sendMut`/`fetch` awaiting it) never resolves disconnected — it
+rejects `TransportClosedError` if the transport was closed and stays closed
+([ADR-0020](./docs/adr/0020-connect-contract-abortable-open.md)).
+
+The socket opener is injectable (`open`, for non-browser runtimes or tests). It
+receives an optional `AbortSignal` that `close()` aborts while the handshake is
+still in flight — honour it (close the socket, reject) so disposing a transport
+before its socket finishes connecting never leaks a CONNECTING socket:
+
+```ts
+new WebSocketTransport<Api>({
+  url,
+  open: (signal) =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(url)
+      signal?.addEventListener("abort", () => { ws.close(); reject(new Error("aborted")) }, { once: true })
+      ws.addEventListener("open", () => resolve(ws))
+      ws.addEventListener("error", () => reject(new Error("ws error")))
+    }),
+})
+```
+
+An opener that ignores the signal still works (the transport closes the socket
+once `open()` resolves), but a handshake that never resolves then leaks.
+
 ### 4. SSR (experimental)
 
 Built on TanStack DB's SSR support (`DbClient` `dehydrate()`/`hydrate()` and

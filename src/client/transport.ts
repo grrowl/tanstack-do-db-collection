@@ -91,6 +91,22 @@ export class MutationRejectedError extends Error {
   }
 }
 
+/** Thrown by `connect()` — and so by any `await connect()` in `subscribe` /
+ *  `sendMut` / `fetch` — when the transport was closed while a dial was in
+ *  flight and was NOT revived by a later `connect()`. `connect()` never
+ *  resolves having adopted no socket (issue #37): it re-dials when revived, or
+ *  rejects with this typed, catchable error so a collection fails its ready
+ *  gate loud (do-collection routes it to `markError`) instead of resolving a
+ *  silently-empty collection or floating an unhandled rejection. The default
+ *  `open()` also rejects with it when `close()` aborts an in-flight handshake
+ *  (issue #38 / ADR-0020). */
+export class TransportClosedError extends Error {
+  constructor(message = "transport closed during connect") {
+    super(message)
+    this.name = "TransportClosedError"
+  }
+}
+
 /** Reconnect delay policy (ADR-0016). Called once per reconnect attempt with
  *  the 1-based attempt number (reset to 1 after each successful open) and,
  *  when the drop came from a socket close, that close's code/reason (a failed
@@ -115,8 +131,16 @@ export function defaultReconnectDelay(baseMs: number, capMs = 30_000): Reconnect
 export interface TransportOptions {
   url: string
   /** Returns a CONNECTED socket. Default opens `new WebSocket(url)` and resolves
-   *  on its `open` event. Tests/other runtimes inject a ready socket. */
-  open?: () => WebSocketLike | Promise<WebSocketLike>
+   *  on its `open` event. Tests/other runtimes inject a ready socket.
+   *
+   *  The optional `AbortSignal` is aborted by `close()` when the handshake is
+   *  still in flight (issue #38 / ADR-0020): an `open` that honours it must
+   *  close its in-flight socket and reject, so a still-CONNECTING socket is
+   *  never leaked — including a handshake that never resolves on its own.
+   *  Ignoring the signal stays backward-compatible (the transport still
+   *  discards and closes the socket if `open()` ever resolves), but a
+   *  never-resolving handshake then leaks; custom openers SHOULD honour it. */
+  open?: (signal?: AbortSignal) => WebSocketLike | Promise<WebSocketLike>
   codec?: FrameCodec
   /** Confirmation/await timeout in ms. */
   timeoutMs?: number
@@ -174,7 +198,11 @@ export class WebSocketTransport<Api = unknown> {
   private connectPromise: Promise<void> | null = null
   private readonly codec: FrameCodec
   private readonly timeoutMs: number
-  private readonly open: () => WebSocketLike | Promise<WebSocketLike>
+  private readonly open: (signal?: AbortSignal) => WebSocketLike | Promise<WebSocketLike>
+  /** The in-flight handshake's abort controller, so close() can tear down a
+   *  socket whose open() has not yet resolved (issue #38 / ADR-0020). Null
+   *  whenever no dial is parked on `await open()`. */
+  private openAbort: AbortController | null = null
 
   private readonly handlers = new Map<
     string,
@@ -217,9 +245,24 @@ export class WebSocketTransport<Api = unknown> {
     this.onClosed = opts.onClosed
     this.open =
       opts.open ??
-      (() =>
+      ((signal?: AbortSignal) =>
         new Promise<WebSocketLike>((resolve, reject) => {
           const ws = new (globalThis as unknown as { WebSocket: new (u: string) => WebSocketLike }).WebSocket(opts.url)
+          const onAbort = (): void => {
+            // close() landed mid-handshake: abort the still-CONNECTING socket so
+            // it is never leaked in CONNECTING forever (issue #38), and reject
+            // typed so the parked connect() unwinds instead of hanging.
+            try {
+              ws.close()
+            } catch {
+              /* already dead */
+            }
+            reject(new TransportClosedError())
+          }
+          if (signal) {
+            if (signal.aborted) return onAbort()
+            signal.addEventListener("abort", onAbort, { once: true })
+          }
           ws.addEventListener("open", () => resolve(ws))
           ws.addEventListener("error", () => reject(new Error("websocket error")))
         }))
@@ -294,18 +337,40 @@ export class WebSocketTransport<Api = unknown> {
   async connect(): Promise<void> {
     if (this.ws) return
     if (this.connectPromise) return this.connectPromise
-    this.connectPromise = (async () => {
+    // Dialing is the clearest statement of intent to be connected: clear the
+    // intentional-close latch so a transport revived after close() (connection
+    // pools do this) auto-reconnects on a later drop AND delivers onClosed
+    // again (issue #37). This is orthogonal to the close-epoch guard below,
+    // which still discards any socket opened before THIS dial's close.
+    this.intentionallyClosed = false
+    const p = (async (): Promise<void> => {
       const epoch = this.closeEpoch
-      const ws = await this.open()
+      const controller = new AbortController()
+      this.openAbort = controller
+      let ws: WebSocketLike
+      try {
+        ws = await this.open(controller.signal)
+      } finally {
+        // Release our handle the instant open() settles — before the epoch
+        // check / install — so a close() during install-processing never aborts
+        // the socket we are about to adopt (it bumps closeEpoch instead).
+        if (this.openAbort === controller) this.openAbort = null
+      }
       if (epoch !== this.closeEpoch) {
-        // close() ran while open() was in flight: the transport is torn down.
-        // Discard the orphan instead of installing it.
+        // close() ran while open() was in flight: the transport was torn down.
+        // Discard the orphan instead of installing it — it must never speak for
+        // the stream.
         try {
           ws.close()
         } catch {
           /* ignore */
         }
-        return
+        // connect() must never RESOLVE disconnected (issue #37). If the
+        // transport was closed and stays closed, reject typed. If a later
+        // connect() revived it (the latch is clear), defer to whichever dial
+        // now owns the transport so our awaiters ride the socket it installs.
+        if (this.intentionallyClosed) throw new TransportClosedError()
+        return this.connect()
       }
       // Browsers default WebSocket.binaryType to "blob"; force "arraybuffer" so
       // binary frames arrive as ArrayBuffer (workerd already does). Without this
@@ -355,11 +420,17 @@ export class WebSocketTransport<Api = unknown> {
         this.resubscribeAll()
       }
     })()
+    this.connectPromise = p
     // A socket that never OPENED fires no close event, so the close-handler
     // recovery path (above) can't run. Clear the cached rejection so the next
     // connect() starts fresh, and re-arm the timer while subscriptions are
     // live — otherwise one unreachable attempt wedges the transport forever.
-    this.connectPromise.catch(() => {
+    // Only the dial that still OWNS connectPromise drives recovery: a superseded
+    // dial (a revived transport's earlier attempt that re-dialed via the epoch
+    // branch above) must not null a newer attempt's promise or double-schedule
+    // its reconnect — that newer attempt owns its own recovery.
+    p.catch(() => {
+      if (this.connectPromise !== p) return
       this.connectPromise = null
       if (!this.intentionallyClosed && this.handlers.size > 0) {
         // A socket that never opened has no close frame — the policy sees an
@@ -367,7 +438,7 @@ export class WebSocketTransport<Api = unknown> {
         this.scheduleReconnect()
       }
     })
-    return this.connectPromise
+    return p
   }
 
   /** Consult the policy and either arm the next reconnect attempt or stop. */
@@ -424,6 +495,12 @@ export class WebSocketTransport<Api = unknown> {
   close(): void {
     this.intentionallyClosed = true
     this.closeEpoch++
+    // Abort an in-flight handshake so a still-CONNECTING socket is closed now,
+    // not leaked until (or unless) its open() eventually resolves (issue #38).
+    // A signal-honouring open() closes its socket and rejects; the epoch guard
+    // in connect() is the backstop for one that ignores the signal.
+    this.openAbort?.abort()
+    this.openAbort = null
     this.clearReconnectTimer()
     for (const w of this.seqWaiters.splice(0)) {
       clearTimeout(w.timer)

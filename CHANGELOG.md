@@ -51,6 +51,16 @@ While pre-1.0, the public API may change between 0.x releases.
   applied cursor. ID-scoped receipts (`committed`/`rejected`/`page`) still
   settle their waiters from a stale socket — they are not re-covered by any
   replay — but never advance the cursor.
+- **`WebSocketTransport.close()` is now revivable (ADR-0020).** A later
+  `connect()` clears the intentional-close latch, restoring auto-reconnect and
+  `onClosed` delivery on a reused transport. Previously `close()` was permanent
+  across a `connect()`: a revived transport (connection pools reuse instances)
+  silently lost both. Code that relied on `close()` being permanently terminal
+  must not re-`connect()` the same instance.
+- **The injectable `open` gains an optional `AbortSignal` (ADR-0020).**
+  Additive and backward-compatible — existing openers compile and run
+  unchanged — but a custom opener should honour it (close its socket, reject)
+  so `close()` during an in-flight handshake frees a still-CONNECTING socket.
 
 ### Fixed
 
@@ -61,6 +71,20 @@ While pre-1.0, the public API may change between 0.x releases.
   a benign no-op — the socket's `webSocketClose` already tore down its subs.
   Covers the `Broadcaster` egress path too (it routes through the same `#send`).
   Outbound-only; no state impact, no behavior change for OPEN sockets (issue #40).
+- **`connect()` never resolves disconnected (ADR-0020, issue #37).** The
+  close-epoch discard previously `return`ed, resolving `connect()` with no
+  socket adopted; the awaiting `subscribe`/`sendMut`/`fetch` then sent on a
+  null socket and threw, floating an unhandled rejection and leaving the
+  collection silently empty. `connect()` now re-dials a revived transport or
+  rejects the new typed `TransportClosedError`; a racing `subscribe` either
+  lands its frame on the next connection or rejects typed (routed to
+  `markError`, so `preload()` fails loud and recovers on retry).
+- **`close()` can abort a socket whose `open()` is still in flight (ADR-0020,
+  issue #38).** Previously `close()` disposed through `this.ws`, which is
+  `null` during the handshake, so a slow or never-completing handshake leaked a
+  CONNECTING socket forever. `close()` now aborts the in-flight `open()` via the
+  `AbortSignal`; the default browser opener honours it, and the close-epoch
+  discard remains the backstop for signal-ignoring openers.
 - `unsubscribe` during an in-flight `subscribe`'s connect no longer sends the
   sub after the socket opens — previously the server persisted a ghost
   subscription (ADR-0019) with no local consumer until the socket dropped.
