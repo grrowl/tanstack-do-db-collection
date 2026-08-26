@@ -31,8 +31,39 @@ export interface SubHandler {
   onSnap(key: unknown, row: unknown): void
   onSnapEnd(): void
   onDelta(op: RowOp, key: unknown, cols: Record<string, unknown> | undefined): void
-  onUptodate(): void
+  /** `ownTerminal` is true only for a sub-scoped boundary addressed to THIS
+   *  subscription (a catch-up's terminal, ADR-0011 D3) — a transient
+   *  subscription may tear itself down on it, but never on a broadcast
+   *  boundary, which can precede its own catch-up frames. */
+  onUptodate(ownTerminal?: boolean): void
   onReset(): void
+}
+
+/** The transport surface `doCollectionOptions` consumes — structural, so the
+ *  WebSocket transport and the SSR snapshot transport are interchangeable
+ *  (ADR-0011 D2). Generic + branded on `Api` so row/table typing survives the
+ *  seam: `WebSocketTransport<Api>` and `SsrSnapshotTransport<Api>` both satisfy
+ *  it, and `doCollectionOptions` still infers the collection set from `Api`. */
+export interface Transport<Api = unknown> {
+  /** phantom — carries `Api` through the structural interface so inference at
+   *  `doCollectionOptions` recovers it (never `unknown`). */
+  readonly __api?: Api
+  connect(): Promise<void>
+  subscribe(
+    subId: string,
+    collection: string,
+    handler: SubHandler,
+    where?: unknown,
+    orderBy?: unknown,
+    limit?: number,
+    since?: string,
+  ): Promise<void>
+  unsubscribe(subId: string): void
+  sendMut(frame: Extract<ClientFrame, { t: "mut" }>): Promise<{ result?: unknown }>
+  fetch(frame: Extract<ClientFrame, { t: "fetch" }>): Promise<Array<unknown>>
+  close(): void
+  readonly appliedCursor: string
+  seedCursor(cursor: string): void
 }
 
 /** Cloudflare's inbound WebSocket edge cap, ~1 MiB (ADR-0018). An
@@ -192,6 +223,60 @@ export class WebSocketTransport<Api = unknown> {
     return String(this.appliedSeq)
   }
 
+  /**
+   * Claim a cursor position on behalf of externally-applied state — SSR
+   * hydration (ADR-0011 D3). The hydrated rows ARE the stream's prefix up to
+   * the dehydrated cursor, so claiming it keeps a bootstrap-window reconnect
+   * from re-snapshotting over them (a fresh snapshot carries no tombstones, so
+   * a row deleted server-side meanwhile would never be removed).
+   *
+   * The claim only ever SHRINKS relative to live progress: claiming a shorter
+   * applied prefix is always safe; claiming a longer one without data never
+   * is. A seed below the current position (a late streamed chunk — upstream
+   * has already applied its possibly-stale rows; there is no veto) regresses
+   * the cursor and resubscribes, so the catch-up replay re-freshens exactly
+   * the clobbered window. Replay is idempotent: latest-op-per-key, applied as
+   * upserts/deletes.
+   */
+  seedCursor(cursor: string): void {
+    const c = BigInt(cursor) // malformed cursor throws — fail loud, never guess
+    if (c <= 0n) return // "0" honestly means: no resume point to claim
+    if (c >= this.appliedSeq && this.appliedSeq !== 0n) return // never grow the claim
+    const wasLive = this.appliedSeq !== 0n && this.ws !== null
+    this.appliedSeq = c
+    if (wasLive && this.handlers.size > 0) {
+      // A live regress cannot replay on the SAME socket: boundary frames the
+      // server already sent (full duplex) would dispatch after the regress
+      // and re-advance the cursor past the repair window — then a drop
+      // resumes beyond it and the late chunk's clobbered rows stay stale
+      // forever. Force a reconnect instead: the old socket stops speaking for
+      // the stream (message dispatch is identity-guarded), and the FRESH
+      // socket resubscribes from the seed — clean ordering, replay guaranteed.
+      this.forceReconnect()
+    }
+  }
+
+  /** Abandon the current socket and reconnect NOW. A cursor-regress reconnect
+   *  is voluntary — not a network failure — so it bypasses the backoff policy
+   *  (no attempt consumed, no delay, and a custom policy cannot declare it
+   *  terminal) but still runs the resubscribe path. A failed open falls back
+   *  into the normal policy-driven retry via connect()'s failure path. */
+  private forceReconnect(): void {
+    const old = this.ws
+    this.ws = null // the identity guards now ignore the old socket entirely
+    this.connectPromise = null
+    try {
+      old?.close()
+    } catch {
+      /* already dead; the reconnect proceeds regardless */
+    }
+    this.reconnecting = true
+    this.clearReconnectTimer()
+    void this.connect().catch(() => {
+      /* retries route through connect()'s failure path (policy-driven) */
+    })
+  }
+
   async connect(): Promise<void> {
     if (this.ws) return
     if (this.connectPromise) return this.connectPromise
@@ -216,7 +301,16 @@ export class WebSocketTransport<Api = unknown> {
       } catch {
         /* some socket impls don't expose binaryType; codec handles AB/Uint8Array */
       }
-      ws.addEventListener("message", (ev) => this.onMessage(ev.data))
+      ws.addEventListener("message", (ev) => {
+        // Only the CURRENT socket speaks for the stream. An abandoned socket
+        // (forceReconnect regress, a superseded reconnect) can still deliver
+        // queued frames — applying them, or worse advancing the cursor on
+        // them, would claim positions the fresh socket's replay is about to
+        // own (ADR-0011 D3). Dropped frames are re-covered by the resubscribe
+        // catch-up from the applied cursor, so nothing is lost — idempotently.
+        if (this.ws !== ws) return
+        this.onMessage(ev.data)
+      })
       ws.addEventListener("close", (ev) => {
         // Only the CURRENT socket's close may detach/reconnect. A stale
         // socket's late close (delivered after close()+connect() installed a
@@ -343,10 +437,13 @@ export class WebSocketTransport<Api = unknown> {
     where?: unknown,
     orderBy?: unknown,
     limit?: number,
+    /** Resume point for the FIRST sub — SSR hydration's dehydrated cursor
+     *  (ADR-0011 D3). One-shot: reconnects resume from `appliedCursor`. */
+    since?: string,
   ): Promise<void> {
     this.handlers.set(subId, { handler, collection, where, orderBy, limit })
     await this.connect()
-    this.sendFrame({ t: "sub", subId, collection, where, orderBy, limit })
+    this.sendFrame({ t: "sub", subId, collection, where, orderBy, limit, since })
   }
 
   unsubscribe(subId: string): void {
@@ -478,7 +575,10 @@ export class WebSocketTransport<Api = unknown> {
         this.handlers.get(frame.sub)?.handler.onDelta(frame.op, frame.key, frame.cols)
         return
       case "uptodate":
-        for (const { handler } of this.handlers.values()) handler.onUptodate()
+        // A sub-scoped terminal (a catch-up's) goes to its handler alone; a
+        // broadcast boundary (coalescer tick / barrier flush) goes to all.
+        if (frame.sub) this.handlers.get(frame.sub)?.handler.onUptodate(true)
+        else for (const { handler } of this.handlers.values()) handler.onUptodate(false)
         this.advance(frame.seq)
         return
       case "committed": {
