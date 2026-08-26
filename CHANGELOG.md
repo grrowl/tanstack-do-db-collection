@@ -54,6 +54,13 @@ While pre-1.0, the public API may change between 0.x releases.
 
 ### Fixed
 
+- `#send` no longer throws an uncaught `Can't call send() after close()` when a
+  client subscribes then closes before the snapshot finishes streaming (normal
+  churn: dispose, navigate-away, StrictMode teardown, forced reconnect). The
+  server now skips sends on a non-`OPEN` socket and treats a post-close send as
+  a benign no-op — the socket's `webSocketClose` already tore down its subs.
+  Covers the `Broadcaster` egress path too (it routes through the same `#send`).
+  Outbound-only; no state impact, no behavior change for OPEN sockets (issue #40).
 - `unsubscribe` during an in-flight `subscribe`'s connect no longer sends the
   sub after the socket opens — previously the server persisted a ghost
   subscription (ADR-0019) with no local consumer until the socket dropped.
