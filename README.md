@@ -267,6 +267,57 @@ same socket: `transport.call.<name>(args)` (typed sugar) or the low-level
 `transport.sendCall("clearRoom", undefined)` — both mint the txId for you and
 resolve with the command's result on `committed`.
 
+### 4. SSR (experimental)
+
+Built on TanStack DB's SSR support (`DbClient` `dehydrate()`/`hydrate()` and
+the `exportSyncMeta`/`importSyncMeta`/`mergeSyncMeta` sync hooks, shipped in
+`@tanstack/db` 0.8.0 — this adapter requires ≥ 0.8.5). Why/how trade-offs
+live in [ADR-0011](./docs/adr/0011-ssr-dehydrate-hydrate.md).
+
+On the worker, render through a **per-request** `DbClient` backed by one
+snapshot read per subscription — no WebSocket from the render path:
+
+```ts
+// Route loader / server handler (per request!)
+import { DbClient, collectionOptions } from "@tanstack/db"
+import { doCollectionOptions, SsrSnapshotTransport } from "tanstack-durable-object-sync/client"
+
+const stub = env.CHAT_DO.get(env.CHAT_DO.idFromName(sessionId))
+// `request` is the incoming (claims-bearing) Request — the DO runs it through
+// parseAttachment, the SAME auth gate as the WebSocket upgrade.
+const transport = new SsrSnapshotTransport<Api>({
+  read: (req) => stub.readSyncSnapshot(req, request),
+})
+const db = new DbClient()
+const messages = db.collection(
+  collectionOptions("messages", () =>
+    doCollectionOptions<Api, "messages">({ transport, table: "messages", getKey: (m) => m.id }),
+  ),
+)
+await messages.preload()
+return { dbState: db.dehydrate() } // rows + our resume cursor (opaque syncMeta)
+```
+
+In the browser, hydrate before going live. The collection is ready
+immediately with the dehydrated rows (stale-while-revalidate); the first sub
+resumes from the dehydrated cursor, so the catch-up applies exactly what
+changed while the HTML was in flight — updates *and* deletes:
+
+```ts
+const db = new DbClient()
+db.hydrate(dbState) // or <HydrationBoundary state={dbState}> from @tanstack/react-db
+const messages = db.collection(
+  collectionOptions("messages", () =>
+    doCollectionOptions<Api, "messages">({ transport: wsTransport, table: "messages", getKey: (m) => m.id }),
+  ),
+)
+```
+
+Mutations during SSR throw (`SsrReadOnlyError`). `readSyncSnapshot` is callable
+by any worker holding the DO binding, and its required `request` argument runs
+through `parseAttachment` — **one auth gate for both the socket and the read
+path**, so a tenant check in `parseAttachment` can't be bypassed by SSR.
+
 ---
 
 ## Examples
