@@ -128,8 +128,14 @@ describe("transport reconnect policy (ADR-0016)", () => {
     t.close()
   })
 
-  it("intentional close() is permanent: connect() works again but drops no longer auto-reconnect", async () => {
-    const room = "rcpol-close-permanent"
+  it("close() suppresses auto-reconnect until a later connect() REVIVES the transport (#37)", async () => {
+    // Contract change (issue #37): close() suppresses auto-reconnect, but a
+    // later connect() is an explicit statement of intent that CLEARS the latch.
+    // A revived transport (connection pools do this) must auto-reconnect again —
+    // the pre-fix latch never reset, silencing reconnect forever on any revived
+    // transport. ADR-0016's `intentionallyClosed` still governs; only its
+    // clearing point moves (from "never" to "on the next connect()").
+    const room = "rcpol-close-revive"
     let opens = 0
     const t = new WebSocketTransport({
       url: `https://example.com/sync/${room}`,
@@ -141,16 +147,16 @@ describe("transport reconnect policy (ADR-0016)", () => {
     })
     await t.subscribe("s1", "messages", noopHandler())
     expect(opens).toBe(1)
-    t.close()
 
-    // connect() after close(): a new socket IS opened (close() nulled ws), but
-    // intentionallyClosed stays true…
+    // While closed, a drop must NOT reconnect (the latch is set).
+    t.close()
+    // Revive: dialing clears the latch, so a subsequent unexpected drop DOES
+    // auto-reconnect on this same instance.
     await t.connect()
     expect(opens).toBe(2)
-    // …so a subsequent unexpected drop performs NO auto-reconnect on this instance.
     await serverDrop(room, 1000, "drop")
-    await new Promise((r) => setTimeout(r, 150))
-    expect(opens).toBe(2)
+    await waitFor(() => opens >= 3) // auto-reconnect restored by the revive
+    t.close()
   })
 })
 

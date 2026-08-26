@@ -27,3 +27,4 @@ explains the displacement.
 | [0017](./0017-blob-wire-normalization.md) | BLOB wire normalization: bare ArrayBuffer becomes Uint8Array at emission | Accepted |
 | [0018](./0018-oversize-frames.md) | Oversize frames: client pre-send guard is the rejection surface; outbound is warn-only | Accepted |
 | [0019](./0019-subscription-persistence-across-hibernation.md) | Subscriptions persist in SQLite and restore on hibernation wake | Accepted |
+| [0020](./0020-connect-contract-abortable-open.md) | connect() never resolves disconnected; open() is abortable via AbortSignal | Accepted (amends 0016 + 0011 seam) |
