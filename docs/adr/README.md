@@ -28,3 +28,4 @@ explains the displacement.
 | [0018](./0018-oversize-frames.md) | Oversize frames: client pre-send guard is the rejection surface; outbound is warn-only | Accepted |
 | [0019](./0019-subscription-persistence-across-hibernation.md) | Subscriptions persist in SQLite and restore on hibernation wake | Accepted |
 | [0020](./0020-connect-contract-abortable-open.md) | connect() never resolves disconnected; open() is abortable via AbortSignal | Accepted (amends 0016 + 0011 seam) |
+| [0021](./0021-in-flight-settlement-unexpected-close.md) | In-flight mut/call settlement across an unexpected close: hold-and-replay + typed `ConnectionLostError` | Accepted (fixes #39; builds on 0020/0016/0011) |

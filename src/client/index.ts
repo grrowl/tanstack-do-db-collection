@@ -9,8 +9,10 @@
 //     server-filtered by a `where` predicate.
 
 export {
+  ConnectionLostError,
   defaultReconnectDelay,
   MutationRejectedError,
+  TransportClosedError,
   WebSocketTransport,
 } from "./transport.ts"
 export type { ReconnectDelayFn, SubHandler, Transport, TransportOptions, WebSocketLike } from "./transport.ts"
