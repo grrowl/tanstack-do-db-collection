@@ -339,6 +339,10 @@ browser-verified.
   an inbox) behind one Worker: one transport per DO, each typed by its own `Api`
   so `transport.call.*` is scoped to that DO's commands, and a cross-DO feed
   merged client-side (the DO never joins — ADR-0001).
+- **[`examples/ssr`](./examples/ssr)** — TanStack Start on Cloudflare with
+  `routerWithDbClient`: a loader-preloaded page (rows in the server HTML,
+  WebSocket resumes from the dehydrated cursor) and a Suspense-streaming page
+  (`useLiveSuspenseQuery`, result streamed into the document). ADR-0011.
 
 > [!TIP]
 > Using on-demand with `orderBy` + `limit`? Add a **range index** on the order
